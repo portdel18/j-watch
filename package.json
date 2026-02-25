@@ -1,9 +1,8 @@
 {
-  "name": "sentinel-watch",
+  "name": "j-watch",
   "version": "0.1.0",
   "private": true,
-  "description": "Geo-targeted news monitoring dashboard for journalists. Keywords + geography + real-time alerts.",
-  "homepage": ".",
+  "description": "J Watch — Geo-targeted news monitoring dashboard for journalists. Keywords + geography + real-time alerts.",
   "dependencies": {
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
