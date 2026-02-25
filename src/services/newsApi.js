@@ -2,6 +2,11 @@
 // Supports: NewsAPI.org, GNews, NewsData.io, Google News RSS
 // Rate limit tracking, caching, deduplication, smart provider selection
 
+// In production (Vercel), route through /api/news/* serverless functions
+// to avoid CORS and keep API keys server-side.
+const PROXY_BASE = process.env.REACT_APP_PROXY_URL || '';
+const USE_PROXY = process.env.NODE_ENV === 'production' || !!process.env.REACT_APP_PROXY_URL;
+
 const PROVIDERS = {
   newsapi: {
     name: 'NewsAPI.org',
@@ -162,12 +167,11 @@ function normalizeArticle(raw, provider) {
 
 // Provider fetchers
 async function fetchFromNewsAPI(query, options = {}) {
-  const apiKey = process.env.REACT_APP_NEWSAPI_KEY;
-  if (!apiKey || !hasQuota('newsapi')) return [];
+  if (!USE_PROXY && !process.env.REACT_APP_NEWSAPI_KEY) return [];
+  if (!hasQuota('newsapi')) return [];
 
-  const proxyUrl = process.env.REACT_APP_PROXY_URL;
-  const baseUrl = proxyUrl
-    ? `${proxyUrl}/api/news/newsapi`
+  const baseUrl = USE_PROXY
+    ? `${PROXY_BASE}/api/news/newsapi`
     : 'https://newsapi.org/v2/everything';
 
   const params = new URLSearchParams({
@@ -175,7 +179,7 @@ async function fetchFromNewsAPI(query, options = {}) {
     language: 'en',
     sortBy: 'publishedAt',
     pageSize: '20',
-    ...(proxyUrl ? {} : { apiKey }),
+    ...(USE_PROXY ? {} : { apiKey: process.env.REACT_APP_NEWSAPI_KEY }),
   });
 
   if (options.from) params.set('from', options.from);
@@ -194,19 +198,18 @@ async function fetchFromNewsAPI(query, options = {}) {
 }
 
 async function fetchFromGNews(query, options = {}) {
-  const apiKey = process.env.REACT_APP_GNEWS_KEY;
-  if (!apiKey || !hasQuota('gnews')) return [];
+  if (!USE_PROXY && !process.env.REACT_APP_GNEWS_KEY) return [];
+  if (!hasQuota('gnews')) return [];
 
-  const proxyUrl = process.env.REACT_APP_PROXY_URL;
-  const baseUrl = proxyUrl
-    ? `${proxyUrl}/api/news/gnews`
+  const baseUrl = USE_PROXY
+    ? `${PROXY_BASE}/api/news/gnews`
     : 'https://gnews.io/api/v4/search';
 
   const params = new URLSearchParams({
     q: query,
     lang: 'en',
     max: '10',
-    ...(proxyUrl ? {} : { token: apiKey }),
+    ...(USE_PROXY ? {} : { token: process.env.REACT_APP_GNEWS_KEY }),
   });
 
   if (options.from) params.set('from', options.from);
@@ -225,18 +228,17 @@ async function fetchFromGNews(query, options = {}) {
 }
 
 async function fetchFromNewsData(query, options = {}) {
-  const apiKey = process.env.REACT_APP_NEWSDATA_KEY;
-  if (!apiKey || !hasQuota('newsdata')) return [];
+  if (!USE_PROXY && !process.env.REACT_APP_NEWSDATA_KEY) return [];
+  if (!hasQuota('newsdata')) return [];
 
-  const proxyUrl = process.env.REACT_APP_PROXY_URL;
-  const baseUrl = proxyUrl
-    ? `${proxyUrl}/api/news/newsdata`
+  const baseUrl = USE_PROXY
+    ? `${PROXY_BASE}/api/news/newsdata`
     : 'https://newsdata.io/api/1/latest';
 
   const params = new URLSearchParams({
     q: query,
     language: 'en',
-    ...(proxyUrl ? {} : { apikey: apiKey }),
+    ...(USE_PROXY ? {} : { apikey: process.env.REACT_APP_NEWSDATA_KEY }),
   });
 
   try {
@@ -252,12 +254,10 @@ async function fetchFromNewsData(query, options = {}) {
 }
 
 async function fetchFromGoogleRSS(query) {
-  const proxyUrl = process.env.REACT_APP_PROXY_URL;
-
   try {
     let xmlText;
-    if (proxyUrl) {
-      const res = await fetch(`${proxyUrl}/api/news/rss?q=${encodeURIComponent(query)}`);
+    if (USE_PROXY) {
+      const res = await fetch(`${PROXY_BASE}/api/news/rss?q=${encodeURIComponent(query)}`);
       if (!res.ok) throw new Error(`RSS proxy ${res.status}`);
       xmlText = await res.text();
     } else {
@@ -305,9 +305,12 @@ const PROVIDER_ORDER = ['newsapi', 'gnews', 'newsdata'];
 
 function selectProviders() {
   const available = PROVIDER_ORDER.filter(p => {
-    if (p === 'newsapi' && !process.env.REACT_APP_NEWSAPI_KEY) return false;
-    if (p === 'gnews' && !process.env.REACT_APP_GNEWS_KEY) return false;
-    if (p === 'newsdata' && !process.env.REACT_APP_NEWSDATA_KEY) return false;
+    // When using proxy, server handles API keys — try all providers
+    if (!USE_PROXY) {
+      if (p === 'newsapi' && !process.env.REACT_APP_NEWSAPI_KEY) return false;
+      if (p === 'gnews' && !process.env.REACT_APP_GNEWS_KEY) return false;
+      if (p === 'newsdata' && !process.env.REACT_APP_NEWSDATA_KEY) return false;
+    }
     return hasQuota(p);
   });
 
