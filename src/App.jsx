@@ -3,8 +3,9 @@ import ChannelToggle from './components/ChannelToggle';
 import { usePolling } from './hooks/usePolling';
 import { getQuotaStatus } from './services/newsApi';
 import { requestPushPermission, getPushPermission, dispatchNotification } from './services/notifications';
-import { US_STATES, IDAHO_REGIONS } from './data/geography';
+import { US_STATES, IDAHO_REGIONS, SOURCE_MAP } from './data/geography';
 import { FEDERAL_FEEDS, STATE_FEEDS, LOCAL_FEEDS } from './data/govFeeds';
+import { PROVIDERS } from './services/newsApi';
 import { fetchAllGovWatchers } from './services/govWatch';
 
 // ─── localStorage helpers ────────────────────────────────────────────
@@ -354,6 +355,9 @@ export default function App() {
               {displayGovArticles.length > 0 && <span className="tab__badge tab__badge--gov">{displayGovArticles.length}</span>}
             </button>
           )}
+          <button className={`tab ${activeTab === 'sources' ? 'active' : ''}`} onClick={() => setActiveTab('sources')}>
+            Sources
+          </button>
         </div>
 
         {/* Content */}
@@ -479,6 +483,10 @@ export default function App() {
                 </div>
               )}
             </>
+          )}
+
+          {activeTab === 'sources' && (
+            <SourcesPanel />
           )}
         </div>
 
@@ -854,6 +862,205 @@ function WatcherFormModal({ watcher, onSave, onClose }) {
         </form>
       </div>
     </div>
+  );
+}
+
+// ─── Sources Panel ───────────────────────────────────────────────────
+function SourcesPanel() {
+  const [expandedSection, setExpandedSection] = useState(null);
+
+  const toggleSection = (section) => {
+    setExpandedSection(prev => prev === section ? null : section);
+  };
+
+  // Group SOURCE_MAP entries by type
+  const sourcesByType = {};
+  for (const [name, type] of Object.entries(SOURCE_MAP)) {
+    if (!sourcesByType[type]) sourcesByType[type] = [];
+    sourcesByType[type].push(name);
+  }
+
+  const sourceTypeLabels = {
+    wire: 'Wire Services',
+    national: 'National Outlets',
+    local: 'Idaho Local News',
+    broadcast: 'Idaho Broadcast',
+    regional: 'Pacific Northwest Regional',
+    trade: 'Trade / Specialty',
+    opinion: 'Opinion / Analysis',
+  };
+
+  // Collect state names that have feeds
+  const statesWithFeeds = Object.keys(STATE_FEEDS).sort();
+  const statesWithLocalFeeds = Object.keys(LOCAL_FEEDS).sort();
+
+  return (
+    <>
+      <div style={{ marginBottom: 24 }}>
+        <h3 style={{ fontSize: 18, fontWeight: 700, marginBottom: 4 }}>Sources</h3>
+        <p style={{ fontSize: 13, color: 'var(--text-muted)', lineHeight: 1.6 }}>
+          All data sources that J Watch pulls from. News articles come from multiple API providers,
+          and government updates come from official .gov RSS feeds.
+        </p>
+      </div>
+
+      {/* News API Providers */}
+      <div className="sources-section">
+        <div className="sources-section__header" onClick={() => toggleSection('news-apis')}>
+          <div className="sources-section__title">News API Providers</div>
+          <div className="sources-section__count">
+            {Object.keys(PROVIDERS).length} providers
+          </div>
+          <span className="sources-section__chevron">{expandedSection === 'news-apis' ? '\u25B2' : '\u25BC'}</span>
+        </div>
+        {expandedSection === 'news-apis' && (
+          <div className="sources-section__body">
+            <p className="sources-section__desc">
+              J Watch queries multiple news APIs in rotation to maximize coverage while staying within free-tier rate limits.
+            </p>
+            {Object.entries(PROVIDERS).map(([key, provider]) => (
+              <div key={key} className="source-item">
+                <div className="source-item__name">{provider.name}</div>
+                <div className="source-item__meta">
+                  <span className="badge badge--source">{key}</span>
+                  <span>Daily limit: {provider.dailyLimit === Infinity ? 'Unlimited' : provider.dailyLimit}</span>
+                  {provider.envKey && <span className="source-item__env">{provider.envKey}</span>}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Federal Government Feeds */}
+      <div className="sources-section">
+        <div className="sources-section__header" onClick={() => toggleSection('federal')}>
+          <div className="sources-section__title sources-section__title--gov">Federal Government</div>
+          <div className="sources-section__count">
+            {FEDERAL_FEEDS.length} feeds
+          </div>
+          <span className="sources-section__chevron">{expandedSection === 'federal' ? '\u25B2' : '\u25BC'}</span>
+        </div>
+        {expandedSection === 'federal' && (
+          <div className="sources-section__body">
+            <p className="sources-section__desc">
+              Official RSS/Atom feeds from federal agencies and departments. All sources are .gov or .mil domains.
+            </p>
+            {FEDERAL_FEEDS.map(feed => (
+              <div key={feed.id} className="source-item source-item--gov">
+                <div className="source-item__name">{feed.name}</div>
+                <div className="source-item__meta">
+                  <span className="badge badge--gov-category">{feed.category}</span>
+                  <a href={feed.url} target="_blank" rel="noopener noreferrer" className="source-item__link">
+                    {new URL(feed.url).hostname}
+                  </a>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* State Government Feeds */}
+      <div className="sources-section">
+        <div className="sources-section__header" onClick={() => toggleSection('state')}>
+          <div className="sources-section__title sources-section__title--gov">State Government</div>
+          <div className="sources-section__count">
+            {statesWithFeeds.length} states &middot; {statesWithFeeds.reduce((sum, s) => sum + STATE_FEEDS[s].length, 0)} feeds
+          </div>
+          <span className="sources-section__chevron">{expandedSection === 'state' ? '\u25B2' : '\u25BC'}</span>
+        </div>
+        {expandedSection === 'state' && (
+          <div className="sources-section__body">
+            <p className="sources-section__desc">
+              State-level government RSS feeds organized by state.
+            </p>
+            {statesWithFeeds.map(state => (
+              <div key={state} className="sources-state-group">
+                <div className="sources-state-group__name">{state}</div>
+                {STATE_FEEDS[state].map(feed => (
+                  <div key={feed.id} className="source-item source-item--gov source-item--nested">
+                    <div className="source-item__name">{feed.name}</div>
+                    <div className="source-item__meta">
+                      <span className="badge badge--gov-category">{feed.category}</span>
+                      <a href={feed.url} target="_blank" rel="noopener noreferrer" className="source-item__link">
+                        {new URL(feed.url).hostname}
+                      </a>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Local Government Feeds */}
+      <div className="sources-section">
+        <div className="sources-section__header" onClick={() => toggleSection('local')}>
+          <div className="sources-section__title sources-section__title--gov">Local Government</div>
+          <div className="sources-section__count">
+            {statesWithLocalFeeds.length} states &middot; {statesWithLocalFeeds.reduce((sum, s) => sum + LOCAL_FEEDS[s].length, 0)} feeds
+          </div>
+          <span className="sources-section__chevron">{expandedSection === 'local' ? '\u25B2' : '\u25BC'}</span>
+        </div>
+        {expandedSection === 'local' && (
+          <div className="sources-section__body">
+            <p className="sources-section__desc">
+              City and county level government RSS feeds.
+            </p>
+            {statesWithLocalFeeds.map(state => (
+              <div key={state} className="sources-state-group">
+                <div className="sources-state-group__name">{state}</div>
+                {LOCAL_FEEDS[state].map(feed => (
+                  <div key={feed.id} className="source-item source-item--gov source-item--nested">
+                    <div className="source-item__name">{feed.name}</div>
+                    <div className="source-item__meta">
+                      <span className="badge badge--gov-category">{feed.category}</span>
+                      <a href={feed.url} target="_blank" rel="noopener noreferrer" className="source-item__link">
+                        {new URL(feed.url).hostname}
+                      </a>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* News Source Classification */}
+      <div className="sources-section">
+        <div className="sources-section__header" onClick={() => toggleSection('classification')}>
+          <div className="sources-section__title">News Source Classification</div>
+          <div className="sources-section__count">
+            {Object.keys(SOURCE_MAP).length} outlets
+          </div>
+          <span className="sources-section__chevron">{expandedSection === 'classification' ? '\u25B2' : '\u25BC'}</span>
+        </div>
+        {expandedSection === 'classification' && (
+          <div className="sources-section__body">
+            <p className="sources-section__desc">
+              How J Watch classifies news outlets for geo-scoring and source-type tagging.
+            </p>
+            {Object.entries(sourceTypeLabels).map(([type, label]) => {
+              const sources = sourcesByType[type];
+              if (!sources || sources.length === 0) return null;
+              return (
+                <div key={type} className="sources-type-group">
+                  <div className="sources-type-group__label">{label}</div>
+                  <div className="sources-type-group__list">
+                    {sources.map(name => (
+                      <span key={name} className="sources-type-group__tag">{name}</span>
+                    ))}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    </>
   );
 }
 
