@@ -4,7 +4,8 @@ import { usePolling } from './hooks/usePolling';
 import { getQuotaStatus } from './services/newsApi';
 import { requestPushPermission, getPushPermission, dispatchNotification } from './services/notifications';
 import { US_STATES, IDAHO_REGIONS } from './data/geography';
-import { fetchGovArticles } from './services/govWatch';
+import { FEDERAL_FEEDS, STATE_FEEDS } from './data/govFeeds';
+import { fetchAllGovWatchers } from './services/govWatch';
 
 // ─── localStorage helpers ────────────────────────────────────────────
 function loadJSON(key, fallback) {
@@ -30,11 +31,6 @@ const DEFAULT_SETTINGS = {
   digestTime: '07:00',
   emailAddress: '',
   slackWebhook: '',
-  // Government Watch
-  govWatchEnabled: false,
-  govFederal: true,
-  govState: '',
-  govFilter: '',
 };
 
 const DEFAULT_WATCHER = {
@@ -72,26 +68,26 @@ export default function App() {
   const [editingWatcher, setEditingWatcher] = useState(null);
   const [showExcluded, setShowExcluded] = useState(false);
 
-  // Polling
-  const { articles, excluded, isPolling, lastPoll, error, pollNow } = usePolling(watchers, settings);
-
-  // Government Watch state
+  // Gov Watchers
+  const [govWatchers, setGovWatchers] = useState(() => loadJSON('jwatch_gov_watchers', []));
+  const [showGovWatcherForm, setShowGovWatcherForm] = useState(false);
+  const [selectedGovWatcher, setSelectedGovWatcher] = useState(null);
   const [govArticles, setGovArticles] = useState([]);
   const [govPolling, setGovPolling] = useState(false);
   const [govLastPoll, setGovLastPoll] = useState(null);
   const [govError, setGovError] = useState(null);
 
+  // Polling
+  const { articles, excluded, isPolling, lastPoll, error, pollNow } = usePolling(watchers, settings);
+
+  // Gov Watch polling
   const pollGov = useCallback(async () => {
-    if (!settings.govWatchEnabled) return;
+    const active = govWatchers.filter(gw => gw.active);
+    if (active.length === 0) return;
     setGovPolling(true);
     setGovError(null);
     try {
-      const results = await fetchGovArticles({
-        enabled: true,
-        federal: settings.govFederal,
-        govState: settings.govState,
-        govFilter: settings.govFilter,
-      });
+      const results = await fetchAllGovWatchers(active);
       setGovArticles(results);
       setGovLastPoll(new Date());
     } catch (err) {
@@ -100,20 +96,22 @@ export default function App() {
     } finally {
       setGovPolling(false);
     }
-  }, [settings.govWatchEnabled, settings.govFederal, settings.govState, settings.govFilter]);
+  }, [govWatchers]);
 
-  // Auto-poll Gov Watch on settings change + interval
+  // Auto-poll Gov Watch on interval
   useEffect(() => {
-    if (!settings.govWatchEnabled) return;
+    const active = govWatchers.filter(gw => gw.active);
+    if (active.length === 0) return;
     pollGov();
     const interval = setInterval(pollGov, (settings.pollingInterval || 5) * 60 * 1000);
     return () => clearInterval(interval);
-  }, [settings.govWatchEnabled, pollGov, settings.pollingInterval]);
+  }, [govWatchers, pollGov, settings.pollingInterval]);
 
   // Persist to localStorage
   useEffect(() => { saveJSON('jwatch_watchers', watchers); }, [watchers]);
   useEffect(() => { saveJSON('jwatch_notifications', notifications); }, [notifications]);
   useEffect(() => { saveJSON('jwatch_settings', settings); }, [settings]);
+  useEffect(() => { saveJSON('jwatch_gov_watchers', govWatchers); }, [govWatchers]);
 
   // Handle new matched articles → create notifications
   const prevArticleCountRef = React.useRef(0);
@@ -170,6 +168,31 @@ export default function App() {
     setWatchers(prev => prev.map(w => w.id === id ? { ...w, active: !w.active } : w));
   }, []);
 
+  // ─── Gov Watcher CRUD ─────────────────────────────────────────────
+  const createGovWatcher = useCallback((feed, level) => {
+    const gw = {
+      id: generateId(),
+      feedId: feed.id,
+      name: feed.name,
+      category: feed.category,
+      level,
+      feedUrl: feed.url,
+      active: true,
+      createdAt: new Date().toISOString(),
+    };
+    setGovWatchers(prev => [...prev, gw]);
+    setShowGovWatcherForm(false);
+  }, []);
+
+  const deleteGovWatcher = useCallback((id) => {
+    setGovWatchers(prev => prev.filter(gw => gw.id !== id));
+    if (selectedGovWatcher === id) setSelectedGovWatcher(null);
+  }, [selectedGovWatcher]);
+
+  const toggleGovWatcher = useCallback((id) => {
+    setGovWatchers(prev => prev.map(gw => gw.id === id ? { ...gw, active: !gw.active } : gw));
+  }, []);
+
   // ─── Notifications ─────────────────────────────────────────────────
   const markAllRead = useCallback(() => {
     setNotifications(prev => prev.map(n => ({ ...n, read: true })));
@@ -189,6 +212,11 @@ export default function App() {
     ? excluded.filter(a => a.matchedWatcherId === selectedWatcher)
     : excluded;
 
+  // Gov Watch filtered articles
+  const displayGovArticles = selectedGovWatcher
+    ? govArticles.filter(a => a.govWatcherId === selectedGovWatcher)
+    : govArticles;
+
   // ─── Render ────────────────────────────────────────────────────────
   return (
     <div className="app">
@@ -206,7 +234,7 @@ export default function App() {
             <div
               key={w.id}
               className={`watcher-card ${w.id === selectedWatcher ? 'active' : ''} ${!w.active ? 'inactive' : ''}`}
-              onClick={() => setSelectedWatcher(w.id === selectedWatcher ? null : w.id)}
+              onClick={() => { setSelectedWatcher(w.id === selectedWatcher ? null : w.id); setSelectedGovWatcher(null); setActiveTab('feed'); }}
             >
               <div className="watcher-card__name">{w.name || 'Unnamed'}</div>
               <div className="watcher-card__meta">
@@ -229,6 +257,35 @@ export default function App() {
           ))}
           <button className="btn btn--primary" style={{ width: '100%', marginTop: 8 }} onClick={() => { setEditingWatcher(null); setShowWatcherForm(true); }}>
             + New Watcher
+          </button>
+        </div>
+
+        {/* Gov Watchers */}
+        <div className="sidebar__section">
+          <div className="sidebar__section-title gov-section-title">Gov Watch</div>
+          {govWatchers.map(gw => (
+            <div
+              key={gw.id}
+              className={`watcher-card gov-watcher-card ${gw.id === selectedGovWatcher ? 'active' : ''} ${!gw.active ? 'inactive' : ''}`}
+              onClick={() => { setSelectedGovWatcher(gw.id === selectedGovWatcher ? null : gw.id); setSelectedWatcher(null); setActiveTab('gov'); }}
+            >
+              <div className="watcher-card__name">{gw.name}</div>
+              <div className="watcher-card__meta">
+                <span>{gw.category}</span>
+                <span className="gov-level-tag">{gw.level}</span>
+              </div>
+              <div className="watcher-card__actions">
+                <button className="btn btn--sm" onClick={(e) => { e.stopPropagation(); toggleGovWatcher(gw.id); }}>
+                  {gw.active ? 'Pause' : 'Resume'}
+                </button>
+                <button className="btn btn--sm btn--danger" onClick={(e) => { e.stopPropagation(); deleteGovWatcher(gw.id); }}>
+                  Delete
+                </button>
+              </div>
+            </div>
+          ))}
+          <button className="btn btn--gov" style={{ width: '100%', marginTop: 8 }} onClick={() => setShowGovWatcherForm(true)}>
+            + New Gov Watcher
           </button>
         </div>
 
@@ -286,10 +343,10 @@ export default function App() {
             Notifications
             {unreadCount > 0 && <span className="tab__badge">{unreadCount}</span>}
           </button>
-          {settings.govWatchEnabled && (
+          {govWatchers.length > 0 && (
             <button className={`tab ${activeTab === 'gov' ? 'active' : ''}`} onClick={() => setActiveTab('gov')}>
               Gov Watch
-              {govArticles.length > 0 && <span className="tab__badge tab__badge--gov">{govArticles.length}</span>}
+              {displayGovArticles.length > 0 && <span className="tab__badge tab__badge--gov">{displayGovArticles.length}</span>}
             </button>
           )}
         </div>
@@ -377,10 +434,10 @@ export default function App() {
             <>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
                 <h3 style={{ fontSize: 16 }}>
-                  Government Watch
-                  {settings.govFilter && (
+                  Gov Watch
+                  {selectedGovWatcher && (
                     <span style={{ fontSize: 12, color: 'var(--text-muted)', fontWeight: 400, marginLeft: 8 }}>
-                      filtered: {settings.govFilter}
+                      {govWatchers.find(gw => gw.id === selectedGovWatcher)?.name}
                     </span>
                   )}
                 </h3>
@@ -395,23 +452,25 @@ export default function App() {
                 </div>
               )}
 
-              {govArticles.length === 0 ? (
+              {displayGovArticles.length === 0 ? (
                 <div className="empty-state">
                   <div className="empty-state__icon">&#127963;</div>
                   <div className="empty-state__title">No government updates</div>
                   <div className="empty-state__text">
-                    {govPolling ? 'Fetching government feeds...' : 'Click "Refresh" to fetch the latest government press releases and announcements.'}
+                    {govWatchers.filter(gw => gw.active).length === 0
+                      ? 'Create a Gov Watcher from the sidebar to start monitoring government feeds.'
+                      : govPolling ? 'Fetching government feeds...' : 'Click "Refresh" to fetch the latest updates.'}
                   </div>
                 </div>
               ) : (
-                govArticles.map((article, i) => (
+                displayGovArticles.map((article, i) => (
                   <GovArticleCard key={article.url || i} article={article} />
                 ))
               )}
 
               {govLastPoll && (
                 <div style={{ marginTop: 16, fontSize: 12, color: 'var(--text-muted)', textAlign: 'center' }}>
-                  Last fetched: {govLastPoll.toLocaleTimeString()} &middot; {govArticles.length} items
+                  Last fetched: {govLastPoll.toLocaleTimeString()} &middot; {displayGovArticles.length} items
                 </div>
               )}
             </>
@@ -422,13 +481,16 @@ export default function App() {
         <div className="status-bar">
           <div className="status-bar__left">
             <span>
-              <span className={`status-dot ${isPolling ? 'status-dot--polling' : error ? 'status-dot--error' : 'status-dot--active'}`} />
-              {isPolling ? 'Polling...' : error ? 'Error' : 'Ready'}
+              <span className={`status-dot ${isPolling || govPolling ? 'status-dot--polling' : error || govError ? 'status-dot--error' : 'status-dot--active'}`} />
+              {isPolling || govPolling ? 'Polling...' : error || govError ? 'Error' : 'Ready'}
             </span>
             {lastPoll && <span>Last poll: {lastPoll.toLocaleTimeString()}</span>}
           </div>
           <div className="status-bar__right">
-            <span>{watchers.filter(w => w.active).length}/{watchers.length} watchers active</span>
+            <span>{watchers.filter(w => w.active).length}/{watchers.length} watchers</span>
+            {govWatchers.length > 0 && (
+              <span>{govWatchers.filter(gw => gw.active).length}/{govWatchers.length} gov</span>
+            )}
             <span>{articles.length} articles</span>
           </div>
         </div>
@@ -446,6 +508,15 @@ export default function App() {
             }
           }}
           onClose={() => { setShowWatcherForm(false); setEditingWatcher(null); }}
+        />
+      )}
+
+      {/* Gov Watcher Form Modal */}
+      {showGovWatcherForm && (
+        <GovWatcherFormModal
+          existingFeedIds={govWatchers.map(gw => gw.feedId)}
+          onCreate={createGovWatcher}
+          onClose={() => setShowGovWatcherForm(false)}
         />
       )}
 
@@ -519,6 +590,96 @@ function GovArticleCard({ article }) {
         )}
         <span>{article.source}</span>
         <span>{article.date ? new Date(article.date).toLocaleDateString() : ''}</span>
+      </div>
+    </div>
+  );
+}
+
+// ─── Gov Watcher Form Modal ─────────────────────────────────────────
+function GovWatcherFormModal({ existingFeedIds, onCreate, onClose }) {
+  const [search, setSearch] = useState('');
+  const [selectedState, setSelectedState] = useState('');
+
+  const searchLower = search.toLowerCase();
+
+  // Build the browsable feed list
+  const federalFiltered = FEDERAL_FEEDS.filter(f =>
+    !existingFeedIds.includes(f.id) &&
+    (searchLower === '' || f.name.toLowerCase().includes(searchLower) || f.category.toLowerCase().includes(searchLower))
+  );
+
+  const stateFeeds = selectedState && STATE_FEEDS[selectedState]
+    ? STATE_FEEDS[selectedState].filter(f =>
+        !existingFeedIds.includes(f.id) &&
+        (searchLower === '' || f.name.toLowerCase().includes(searchLower) || f.category.toLowerCase().includes(searchLower))
+      )
+    : [];
+
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal" onClick={e => e.stopPropagation()}>
+        <div className="modal__header">
+          <div className="modal__title">Add Gov Watcher</div>
+          <button className="modal__close" onClick={onClose}>&times;</button>
+        </div>
+        <div className="modal__body">
+          <div className="form-group">
+            <input
+              className="form-input"
+              value={search}
+              onChange={e => setSearch(e.target.value)}
+              placeholder="Search agencies..."
+              autoFocus
+            />
+          </div>
+
+          {/* Federal feeds */}
+          <div className="gov-picker__section">
+            <div className="gov-picker__section-title">Federal Agencies</div>
+            {federalFiltered.length === 0 ? (
+              <div className="gov-picker__empty">
+                {search ? 'No matches' : 'All federal agencies added'}
+              </div>
+            ) : (
+              federalFiltered.map(feed => (
+                <div key={feed.id} className="gov-picker__item" onClick={() => onCreate(feed, 'federal')}>
+                  <div className="gov-picker__item-name">{feed.name}</div>
+                  <div className="gov-picker__item-meta">{feed.category}</div>
+                </div>
+              ))
+            )}
+          </div>
+
+          {/* State feed picker */}
+          <div className="gov-picker__section">
+            <div className="gov-picker__section-title">State Government</div>
+            <div className="form-group" style={{ marginBottom: 8 }}>
+              <select
+                className="form-select"
+                value={selectedState}
+                onChange={e => setSelectedState(e.target.value)}
+              >
+                <option value="">Select a state...</option>
+                {US_STATES.map(s => <option key={s} value={s}>{s}</option>)}
+              </select>
+            </div>
+            {selectedState && stateFeeds.length === 0 ? (
+              <div className="gov-picker__empty">
+                {search ? 'No matches' : `All ${selectedState} agencies added`}
+              </div>
+            ) : (
+              stateFeeds.map(feed => (
+                <div key={feed.id} className="gov-picker__item" onClick={() => onCreate(feed, 'state')}>
+                  <div className="gov-picker__item-name">{feed.name}</div>
+                  <div className="gov-picker__item-meta">{feed.category}</div>
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+        <div className="modal__footer">
+          <button type="button" className="btn" onClick={onClose}>Done</button>
+        </div>
       </div>
     </div>
   );
@@ -753,46 +914,6 @@ function SettingsModal({ settings, onSave, onClose }) {
             <div className="form-group">
               <label className="form-label">Slack Webhook URL</label>
               <input className="form-input" type="url" value={form.slackWebhook} onChange={e => setForm({ ...form, slackWebhook: e.target.value })} placeholder="https://hooks.slack.com/services/..." />
-            </div>
-
-            <hr style={{ border: 'none', borderTop: '1px solid var(--border)', margin: '16px 0' }} />
-
-            <div className="gov-settings">
-              <div className="gov-settings__header">Government Watch</div>
-
-              <div className="form-group">
-                <label className="form-label" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                  <input type="checkbox" checked={form.govWatchEnabled || false} onChange={e => setForm({ ...form, govWatchEnabled: e.target.checked })} />
-                  Enable Government Watch
-                </label>
-                <div className="form-hint">Pull press releases and announcements from official government sources</div>
-              </div>
-
-              {form.govWatchEnabled && (
-                <>
-                  <div className="form-group">
-                    <label className="form-label" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                      <input type="checkbox" checked={form.govFederal !== false} onChange={e => setForm({ ...form, govFederal: e.target.checked })} />
-                      Federal (White House, Congress, Federal Register, Agencies)
-                    </label>
-                  </div>
-
-                  <div className="form-group">
-                    <label className="form-label">State</label>
-                    <select className="form-select" value={form.govState || ''} onChange={e => setForm({ ...form, govState: e.target.value })}>
-                      <option value="">None</option>
-                      {US_STATES.map(s => <option key={s} value={s}>{s}</option>)}
-                    </select>
-                    <div className="form-hint">Select a state to include governor and state agency feeds</div>
-                  </div>
-
-                  <div className="form-group">
-                    <label className="form-label">Filter Keywords (optional)</label>
-                    <input className="form-input" value={form.govFilter || ''} onChange={e => setForm({ ...form, govFilter: e.target.value })} placeholder="e.g. environment, housing, immigration" />
-                    <div className="form-hint">Comma-separated. Narrows results after fetch. Leave blank to see everything.</div>
-                  </div>
-                </>
-              )}
             </div>
           </div>
 
