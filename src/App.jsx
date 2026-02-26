@@ -72,9 +72,12 @@ export default function App() {
   const [govWatchers, setGovWatchers] = useState(() => loadJSON('jwatch_gov_watchers', []));
   const [showGovWatcherForm, setShowGovWatcherForm] = useState(false);
   const [selectedGovWatcher, setSelectedGovWatcher] = useState(null);
-  const [govArticles, setGovArticles] = useState([]);
+  const [govArticles, setGovArticles] = useState(() => loadJSON('jwatch_gov_articles', []));
   const [govPolling, setGovPolling] = useState(false);
-  const [govLastPoll, setGovLastPoll] = useState(null);
+  const [govLastPoll, setGovLastPoll] = useState(() => {
+    const saved = localStorage.getItem('jwatch_gov_lastPoll');
+    return saved ? new Date(saved) : null;
+  });
   const [govError, setGovError] = useState(null);
 
   // Polling
@@ -112,6 +115,8 @@ export default function App() {
   useEffect(() => { saveJSON('jwatch_notifications', notifications); }, [notifications]);
   useEffect(() => { saveJSON('jwatch_settings', settings); }, [settings]);
   useEffect(() => { saveJSON('jwatch_gov_watchers', govWatchers); }, [govWatchers]);
+  useEffect(() => { saveJSON('jwatch_gov_articles', govArticles); }, [govArticles]);
+  useEffect(() => { if (govLastPoll) localStorage.setItem('jwatch_gov_lastPoll', govLastPoll.toISOString()); }, [govLastPoll]);
 
   // Handle new matched articles → create notifications
   const prevArticleCountRef = React.useRef(0);
