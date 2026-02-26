@@ -671,6 +671,45 @@ body {
   margin: 0 auto;
 }
 
+/* Government Watch */
+.badge--gov {
+  background: rgba(255, 215, 0, 0.15);
+  color: #ffd740;
+}
+
+.badge--gov-category {
+  background: rgba(255, 215, 0, 0.08);
+  color: #ffab40;
+}
+
+.tab__badge--gov {
+  background: rgba(255, 215, 0, 0.15);
+  color: #ffd740;
+}
+
+.gov-article-card {
+  border-left: 3px solid #ffd740;
+}
+
+.gov-settings__header {
+  font-size: 14px;
+  font-weight: 700;
+  color: #ffd740;
+  margin-bottom: 12px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.gov-settings__header::before {
+  content: '';
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #ffd740;
+}
+
 /* Scrollbar */
 ::-webkit-scrollbar {
   width: 6px;

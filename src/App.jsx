@@ -4,6 +4,7 @@ import { usePolling } from './hooks/usePolling';
 import { getQuotaStatus } from './services/newsApi';
 import { requestPushPermission, getPushPermission, dispatchNotification } from './services/notifications';
 import { US_STATES, IDAHO_REGIONS } from './data/geography';
+import { fetchGovArticles } from './services/govWatch';
 
 // ─── localStorage helpers ────────────────────────────────────────────
 function loadJSON(key, fallback) {
@@ -29,6 +30,11 @@ const DEFAULT_SETTINGS = {
   digestTime: '07:00',
   emailAddress: '',
   slackWebhook: '',
+  // Government Watch
+  govWatchEnabled: false,
+  govFederal: true,
+  govState: '',
+  govFilter: '',
 };
 
 const DEFAULT_WATCHER = {
@@ -68,6 +74,41 @@ export default function App() {
 
   // Polling
   const { articles, excluded, isPolling, lastPoll, error, pollNow } = usePolling(watchers, settings);
+
+  // Government Watch state
+  const [govArticles, setGovArticles] = useState([]);
+  const [govPolling, setGovPolling] = useState(false);
+  const [govLastPoll, setGovLastPoll] = useState(null);
+  const [govError, setGovError] = useState(null);
+
+  const pollGov = useCallback(async () => {
+    if (!settings.govWatchEnabled) return;
+    setGovPolling(true);
+    setGovError(null);
+    try {
+      const results = await fetchGovArticles({
+        enabled: true,
+        federal: settings.govFederal,
+        govState: settings.govState,
+        govFilter: settings.govFilter,
+      });
+      setGovArticles(results);
+      setGovLastPoll(new Date());
+    } catch (err) {
+      console.error('[GovWatch] Poll error:', err);
+      setGovError(err.message);
+    } finally {
+      setGovPolling(false);
+    }
+  }, [settings.govWatchEnabled, settings.govFederal, settings.govState, settings.govFilter]);
+
+  // Auto-poll Gov Watch on settings change + interval
+  useEffect(() => {
+    if (!settings.govWatchEnabled) return;
+    pollGov();
+    const interval = setInterval(pollGov, (settings.pollingInterval || 5) * 60 * 1000);
+    return () => clearInterval(interval);
+  }, [settings.govWatchEnabled, pollGov, settings.pollingInterval]);
 
   // Persist to localStorage
   useEffect(() => { saveJSON('jwatch_watchers', watchers); }, [watchers]);
@@ -245,6 +286,12 @@ export default function App() {
             Notifications
             {unreadCount > 0 && <span className="tab__badge">{unreadCount}</span>}
           </button>
+          {settings.govWatchEnabled && (
+            <button className={`tab ${activeTab === 'gov' ? 'active' : ''}`} onClick={() => setActiveTab('gov')}>
+              Gov Watch
+              {govArticles.length > 0 && <span className="tab__badge tab__badge--gov">{govArticles.length}</span>}
+            </button>
+          )}
         </div>
 
         {/* Content */}
@@ -322,6 +369,50 @@ export default function App() {
                     </div>
                   </div>
                 ))
+              )}
+            </>
+          )}
+
+          {activeTab === 'gov' && (
+            <>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+                <h3 style={{ fontSize: 16 }}>
+                  Government Watch
+                  {settings.govFilter && (
+                    <span style={{ fontSize: 12, color: 'var(--text-muted)', fontWeight: 400, marginLeft: 8 }}>
+                      filtered: {settings.govFilter}
+                    </span>
+                  )}
+                </h3>
+                <button className="btn btn--sm" onClick={pollGov} disabled={govPolling}>
+                  {govPolling ? 'Fetching...' : 'Refresh'}
+                </button>
+              </div>
+
+              {govError && (
+                <div style={{ padding: '12px 16px', marginBottom: 12, background: 'var(--danger-dim)', border: '1px solid var(--danger)', borderRadius: 'var(--radius)', fontSize: 13 }}>
+                  Gov Watch error: {govError}
+                </div>
+              )}
+
+              {govArticles.length === 0 ? (
+                <div className="empty-state">
+                  <div className="empty-state__icon">&#127963;</div>
+                  <div className="empty-state__title">No government updates</div>
+                  <div className="empty-state__text">
+                    {govPolling ? 'Fetching government feeds...' : 'Click "Refresh" to fetch the latest government press releases and announcements.'}
+                  </div>
+                </div>
+              ) : (
+                govArticles.map((article, i) => (
+                  <GovArticleCard key={article.url || i} article={article} />
+                ))
+              )}
+
+              {govLastPoll && (
+                <div style={{ marginTop: 16, fontSize: 12, color: 'var(--text-muted)', textAlign: 'center' }}>
+                  Last fetched: {govLastPoll.toLocaleTimeString()} &middot; {govArticles.length} items
+                </div>
               )}
             </>
           )}
@@ -403,6 +494,32 @@ function ArticleCard({ article, excluded }) {
           Matched: {article.matchedLocations.join(', ')}
         </div>
       )}
+    </div>
+  );
+}
+
+// ─── Gov Article Card ─────────────────────────────────────────────────
+function GovArticleCard({ article }) {
+  return (
+    <div className="article-card gov-article-card">
+      <div className="article-card__header">
+        <div className="article-card__title">
+          <a href={article.url} target="_blank" rel="noopener noreferrer">
+            {article.title}
+          </a>
+        </div>
+      </div>
+      {article.snippet && (
+        <div className="article-card__snippet">{article.snippet}</div>
+      )}
+      <div className="article-card__meta">
+        <span className="badge badge--gov">{article.govLevel || 'gov'}</span>
+        {article.govCategory && (
+          <span className="badge badge--gov-category">{article.govCategory}</span>
+        )}
+        <span>{article.source}</span>
+        <span>{article.date ? new Date(article.date).toLocaleDateString() : ''}</span>
+      </div>
     </div>
   );
 }
@@ -636,6 +753,46 @@ function SettingsModal({ settings, onSave, onClose }) {
             <div className="form-group">
               <label className="form-label">Slack Webhook URL</label>
               <input className="form-input" type="url" value={form.slackWebhook} onChange={e => setForm({ ...form, slackWebhook: e.target.value })} placeholder="https://hooks.slack.com/services/..." />
+            </div>
+
+            <hr style={{ border: 'none', borderTop: '1px solid var(--border)', margin: '16px 0' }} />
+
+            <div className="gov-settings">
+              <div className="gov-settings__header">Government Watch</div>
+
+              <div className="form-group">
+                <label className="form-label" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <input type="checkbox" checked={form.govWatchEnabled || false} onChange={e => setForm({ ...form, govWatchEnabled: e.target.checked })} />
+                  Enable Government Watch
+                </label>
+                <div className="form-hint">Pull press releases and announcements from official government sources</div>
+              </div>
+
+              {form.govWatchEnabled && (
+                <>
+                  <div className="form-group">
+                    <label className="form-label" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                      <input type="checkbox" checked={form.govFederal !== false} onChange={e => setForm({ ...form, govFederal: e.target.checked })} />
+                      Federal (White House, Congress, Federal Register, Agencies)
+                    </label>
+                  </div>
+
+                  <div className="form-group">
+                    <label className="form-label">State</label>
+                    <select className="form-select" value={form.govState || ''} onChange={e => setForm({ ...form, govState: e.target.value })}>
+                      <option value="">None</option>
+                      {US_STATES.map(s => <option key={s} value={s}>{s}</option>)}
+                    </select>
+                    <div className="form-hint">Select a state to include governor and state agency feeds</div>
+                  </div>
+
+                  <div className="form-group">
+                    <label className="form-label">Filter Keywords (optional)</label>
+                    <input className="form-input" value={form.govFilter || ''} onChange={e => setForm({ ...form, govFilter: e.target.value })} placeholder="e.g. environment, housing, immigration" />
+                    <div className="form-hint">Comma-separated. Narrows results after fetch. Leave blank to see everything.</div>
+                  </div>
+                </>
+              )}
             </div>
           </div>
 
