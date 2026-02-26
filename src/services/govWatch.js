@@ -1,7 +1,5 @@
 // Government Watch — Fetch and normalize government RSS/Atom feeds
-// Uses the /api/news/gov proxy in production to avoid CORS
-
-import { getGovFeedUrls } from '../data/govFeeds';
+// Supports fetching individual feeds for per-watcher polling
 
 const PROXY_BASE = process.env.REACT_APP_PROXY_URL || '';
 const USE_PROXY = process.env.NODE_ENV === 'production' || !!process.env.REACT_APP_PROXY_URL;
@@ -11,7 +9,6 @@ function parseXmlFeed(xmlText, feedMeta) {
   const parser = new DOMParser();
   const xml = parser.parseFromString(xmlText, 'text/xml');
 
-  // Check for parse errors
   const parseError = xml.querySelector('parsererror');
   if (parseError) return [];
 
@@ -38,6 +35,7 @@ function parseXmlFeed(xmlText, feedMeta) {
           provider: 'gov',
           govCategory: feedMeta.category,
           govLevel: feedMeta.level,
+          govWatcherId: feedMeta.watcherId,
         });
       }
     });
@@ -66,6 +64,7 @@ function parseXmlFeed(xmlText, feedMeta) {
         provider: 'gov',
         govCategory: feedMeta.category,
         govLevel: feedMeta.level,
+        govWatcherId: feedMeta.watcherId,
       });
     }
   });
@@ -88,55 +87,54 @@ function safeDate(dateStr) {
   }
 }
 
-// Fetch a single government feed
-async function fetchSingleFeed(feed, level) {
-  const feedMeta = { ...feed, level };
+// Fetch a single government feed for a specific gov watcher
+export async function fetchGovFeed(govWatcher) {
+  const feedMeta = {
+    name: govWatcher.name,
+    category: govWatcher.category,
+    level: govWatcher.level,
+    watcherId: govWatcher.id,
+  };
 
   try {
     let xmlText;
+    const feedUrl = govWatcher.feedUrl;
 
     if (USE_PROXY) {
-      const proxyUrl = `${PROXY_BASE}/api/news/gov?url=${encodeURIComponent(feed.url)}`;
+      const proxyUrl = `${PROXY_BASE}/api/news/gov?url=${encodeURIComponent(feedUrl)}`;
       const res = await fetch(proxyUrl);
       if (!res.ok) {
-        console.warn(`[GovWatch] Proxy error for ${feed.name}: ${res.status}`);
+        console.warn(`[GovWatch] Proxy error for ${govWatcher.name}: ${res.status}`);
         return [];
       }
       xmlText = await res.text();
     } else {
-      // Direct fetch in dev — may be blocked by CORS
-      const res = await fetch(feed.url);
+      const res = await fetch(feedUrl);
       if (!res.ok) {
-        console.warn(`[GovWatch] Direct fetch error for ${feed.name}: ${res.status}`);
+        console.warn(`[GovWatch] Direct fetch error for ${govWatcher.name}: ${res.status}`);
         return [];
       }
       xmlText = await res.text();
     }
 
-    return parseXmlFeed(xmlText, feedMeta);
+    const articles = parseXmlFeed(xmlText, feedMeta);
+    articles.sort((a, b) => new Date(b.date) - new Date(a.date));
+    return articles;
   } catch (err) {
-    console.warn(`[GovWatch] Failed to fetch ${feed.name}:`, err.message);
+    console.warn(`[GovWatch] Failed to fetch ${govWatcher.name}:`, err.message);
     return [];
   }
 }
 
-// Main: Fetch all configured government feeds
-export async function fetchGovArticles(govSettings = {}) {
-  const { enabled, federal, govState } = govSettings;
-  if (!enabled) return [];
+// Fetch all active gov watchers in parallel
+export async function fetchAllGovWatchers(govWatchers = []) {
+  const active = govWatchers.filter(gw => gw.active);
+  if (active.length === 0) return [];
 
-  const feeds = getGovFeedUrls({ federal, state: govState });
-  if (feeds.length === 0) return [];
+  console.log(`[GovWatch] Fetching ${active.length} gov watcher feeds...`);
 
-  console.log(`[GovWatch] Fetching ${feeds.length} government feeds...`);
-
-  // Fetch all feeds in parallel (they're free, no rate limits)
   const results = await Promise.allSettled(
-    feeds.map(feed => {
-      const level = feed.id.includes('-gov') || feed.id.includes('-leg')
-        ? 'state' : 'federal';
-      return fetchSingleFeed(feed, level);
-    })
+    active.map(gw => fetchGovFeed(gw))
   );
 
   const allArticles = results
@@ -154,23 +152,7 @@ export async function fetchGovArticles(govSettings = {}) {
     }
   }
 
-  // Sort by date, newest first
   unique.sort((a, b) => new Date(b.date) - new Date(a.date));
-
-  // Apply keyword filter if set
-  const filterKeywords = govSettings.govFilter
-    ? govSettings.govFilter.split(',').map(k => k.trim().toLowerCase()).filter(Boolean)
-    : [];
-
-  if (filterKeywords.length > 0) {
-    const filtered = unique.filter(article => {
-      const text = `${article.title} ${article.snippet}`.toLowerCase();
-      return filterKeywords.some(kw => text.includes(kw));
-    });
-    console.log(`[GovWatch] ${unique.length} articles fetched, ${filtered.length} after keyword filter`);
-    return filtered;
-  }
-
-  console.log(`[GovWatch] ${unique.length} articles fetched`);
+  console.log(`[GovWatch] ${unique.length} total articles from ${active.length} watchers`);
   return unique;
 }
