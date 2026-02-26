@@ -4,7 +4,7 @@ import { usePolling } from './hooks/usePolling';
 import { getQuotaStatus } from './services/newsApi';
 import { requestPushPermission, getPushPermission, dispatchNotification } from './services/notifications';
 import { US_STATES, IDAHO_REGIONS } from './data/geography';
-import { FEDERAL_FEEDS, STATE_FEEDS } from './data/govFeeds';
+import { FEDERAL_FEEDS, STATE_FEEDS, LOCAL_FEEDS } from './data/govFeeds';
 import { fetchAllGovWatchers } from './services/govWatch';
 
 // ─── localStorage helpers ────────────────────────────────────────────
@@ -620,6 +620,13 @@ function GovWatcherFormModal({ existingFeedIds, onCreate, onClose }) {
       )
     : [];
 
+  const localFeeds = selectedState && LOCAL_FEEDS[selectedState]
+    ? LOCAL_FEEDS[selectedState].filter(f =>
+        !existingFeedIds.includes(f.id) &&
+        (searchLower === '' || f.name.toLowerCase().includes(searchLower) || f.category.toLowerCase().includes(searchLower))
+      )
+    : [];
+
   return (
     <div className="modal-overlay" onClick={onClose}>
       <div className="modal" onClick={e => e.stopPropagation()}>
@@ -681,6 +688,25 @@ function GovWatcherFormModal({ existingFeedIds, onCreate, onClose }) {
               ))
             )}
           </div>
+
+          {/* Local government feeds */}
+          {selectedState && LOCAL_FEEDS[selectedState] && (
+            <div className="gov-picker__section">
+              <div className="gov-picker__section-title">Local Government — {selectedState}</div>
+              {localFeeds.length === 0 ? (
+                <div className="gov-picker__empty">
+                  {search ? 'No matches' : `All ${selectedState} local agencies added`}
+                </div>
+              ) : (
+                localFeeds.map(feed => (
+                  <div key={feed.id} className="gov-picker__item" onClick={() => onCreate(feed, 'local')}>
+                    <div className="gov-picker__item-name">{feed.name}</div>
+                    <div className="gov-picker__item-meta">{feed.category}</div>
+                  </div>
+                ))
+              )}
+            </div>
+          )}
         </div>
         <div className="modal__footer">
           <button type="button" className="btn" onClick={onClose}>Done</button>
