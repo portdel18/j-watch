@@ -3,11 +3,23 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { fetchArticles } from '../services/newsApi';
 import { matchArticles, buildSearchQuery } from '../services/matchingEngine';
 
+function loadJSON(key, fallback) {
+  try {
+    const raw = localStorage.getItem(key);
+    return raw ? JSON.parse(raw) : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
 export function usePolling(watchers, settings = {}) {
-  const [articles, setArticles] = useState([]);
-  const [excluded, setExcluded] = useState([]);
+  const [articles, setArticles] = useState(() => loadJSON('jwatch_articles', []));
+  const [excluded, setExcluded] = useState(() => loadJSON('jwatch_excluded', []));
   const [isPolling, setIsPolling] = useState(false);
-  const [lastPoll, setLastPoll] = useState(null);
+  const [lastPoll, setLastPoll] = useState(() => {
+    const saved = localStorage.getItem('jwatch_lastPoll');
+    return saved ? new Date(saved) : null;
+  });
   const [error, setError] = useState(null);
   const intervalRef = useRef(null);
   const isMountedRef = useRef(true);
@@ -80,6 +92,11 @@ export function usePolling(watchers, settings = {}) {
       }
     }
   }, [watchers, settings.turboMode]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Persist articles to localStorage
+  useEffect(() => { localStorage.setItem('jwatch_articles', JSON.stringify(articles)); }, [articles]);
+  useEffect(() => { localStorage.setItem('jwatch_excluded', JSON.stringify(excluded)); }, [excluded]);
+  useEffect(() => { if (lastPoll) localStorage.setItem('jwatch_lastPoll', lastPoll.toISOString()); }, [lastPoll]);
 
   // Start/stop polling
   useEffect(() => {
