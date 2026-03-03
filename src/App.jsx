@@ -87,8 +87,11 @@ export default function App() {
 
   // Gov Watch polling — per-watcher intervals
   const govLastPollPerWatcher = React.useRef(loadJSON('jwatch_gov_lastPollPerWatcher', {}));
+  const govPollingRef = React.useRef(false); // guard against concurrent gov polls
 
   const pollGovDue = useCallback(async () => {
+    if (govPollingRef.current) return; // already polling, skip this tick
+
     const now = Date.now();
     const active = govWatchers.filter(gw => gw.active);
     if (active.length === 0) return;
@@ -101,6 +104,7 @@ export default function App() {
     });
     if (due.length === 0) return;
 
+    govPollingRef.current = true;
     setGovPolling(true);
     setGovError(null);
     try {
@@ -136,6 +140,7 @@ export default function App() {
       console.error('[GovWatch] Poll error:', err);
       setGovError(err.message);
     } finally {
+      govPollingRef.current = false;
       setGovPolling(false);
     }
   }, [govWatchers, settings.pollingInterval]);

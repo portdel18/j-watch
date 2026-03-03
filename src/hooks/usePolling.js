@@ -25,6 +25,7 @@ export function usePolling(watchers, settings = {}) {
   const [error, setError] = useState(null);
   const intervalRef = useRef(null);
   const isMountedRef = useRef(true);
+  const isPollingRef = useRef(false); // guard against concurrent polls
   // Track when each watcher was last polled: { [watcherId]: timestamp }
   const lastPollPerWatcher = useRef(
     loadJSON('jwatch_lastPollPerWatcher', {})
@@ -32,12 +33,13 @@ export function usePolling(watchers, settings = {}) {
 
   // Poll only the watchers that are "due" based on their individual pollingInterval
   const pollDue = useCallback(async () => {
+    if (isPollingRef.current) return; // already polling, skip this tick
+
     const now = Date.now();
     const activeWatchers = watchers.filter(w => w.active);
     if (activeWatchers.length === 0) return;
 
     // Figure out which watchers are due
-    const globalDefault = (settings.pollingInterval || 5) * 60 * 1000;
     const dueWatchers = activeWatchers.filter(w => {
       const interval = (w.pollingInterval || settings.pollingInterval || 5) * 60 * 1000;
       const lastTime = lastPollPerWatcher.current[w.id] || 0;
@@ -46,6 +48,7 @@ export function usePolling(watchers, settings = {}) {
 
     if (dueWatchers.length === 0) return;
 
+    isPollingRef.current = true;
     setIsPolling(true);
     setError(null);
 
@@ -117,6 +120,7 @@ export function usePolling(watchers, settings = {}) {
         setError(err.message);
       }
     } finally {
+      isPollingRef.current = false;
       if (isMountedRef.current) {
         setIsPolling(false);
       }
