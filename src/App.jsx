@@ -50,6 +50,7 @@ const DEFAULT_WATCHER = {
   alertMode: 'instant',
   channels: { push: true, email: false, slack: false },
   sourceTypeFilter: [],
+  pollingInterval: 5, // minutes — per-watcher check frequency
 };
 
 function generateId() {
@@ -84,15 +85,52 @@ export default function App() {
   // Polling
   const { articles, excluded, isPolling, lastPoll, error, pollNow } = usePolling(watchers, settings);
 
-  // Gov Watch polling
-  const pollGov = useCallback(async () => {
+  // Gov Watch polling — per-watcher intervals
+  const govLastPollPerWatcher = React.useRef(loadJSON('jwatch_gov_lastPollPerWatcher', {}));
+
+  const pollGovDue = useCallback(async () => {
+    const now = Date.now();
     const active = govWatchers.filter(gw => gw.active);
     if (active.length === 0) return;
+
+    // Find gov watchers whose individual interval has elapsed
+    const due = active.filter(gw => {
+      const interval = (gw.pollingInterval || settings.pollingInterval || 5) * 60 * 1000;
+      const lastTime = govLastPollPerWatcher.current[gw.id] || 0;
+      return now - lastTime >= interval;
+    });
+    if (due.length === 0) return;
+
     setGovPolling(true);
     setGovError(null);
     try {
-      const results = await fetchAllGovWatchers(active);
-      setGovArticles(results);
+      const results = await fetchAllGovWatchers(due);
+
+      // Mark polled watchers
+      for (const gw of due) {
+        govLastPollPerWatcher.current[gw.id] = now;
+      }
+      localStorage.setItem('jwatch_gov_lastPollPerWatcher', JSON.stringify(govLastPollPerWatcher.current));
+
+      // Merge: keep articles from watchers NOT polled this tick, add fresh results
+      setGovArticles(prev => {
+        const polledIds = new Set(due.map(gw => gw.id));
+        const kept = prev.filter(a => !polledIds.has(a.govWatcherId));
+        const combined = [...kept, ...results];
+
+        // Deduplicate by URL
+        const seen = new Set();
+        const unique = [];
+        for (const article of combined) {
+          const key = article.url || article.title;
+          if (!seen.has(key)) {
+            seen.add(key);
+            unique.push(article);
+          }
+        }
+        unique.sort((a, b) => new Date(b.date) - new Date(a.date));
+        return unique;
+      });
       setGovLastPoll(new Date());
     } catch (err) {
       console.error('[GovWatch] Poll error:', err);
@@ -100,16 +138,25 @@ export default function App() {
     } finally {
       setGovPolling(false);
     }
-  }, [govWatchers]);
+  }, [govWatchers, settings.pollingInterval]);
 
-  // Auto-poll Gov Watch on interval
+  // Manual "poll all gov watchers now"
+  const pollGov = useCallback(async () => {
+    const active = govWatchers.filter(gw => gw.active);
+    for (const gw of active) {
+      govLastPollPerWatcher.current[gw.id] = 0;
+    }
+    await pollGovDue();
+  }, [govWatchers, pollGovDue]);
+
+  // Auto-poll Gov Watch — tick every minute, check which gov watchers are due
   useEffect(() => {
     const active = govWatchers.filter(gw => gw.active);
     if (active.length === 0) return;
-    pollGov();
-    const interval = setInterval(pollGov, (settings.pollingInterval || 5) * 60 * 1000);
+    pollGovDue();
+    const interval = setInterval(pollGovDue, 60 * 1000);
     return () => clearInterval(interval);
-  }, [govWatchers, pollGov, settings.pollingInterval]);
+  }, [govWatchers, pollGovDue]);
 
   // Persist to localStorage
   useEffect(() => { saveJSON('jwatch_watchers', watchers); }, [watchers]);
@@ -175,7 +222,7 @@ export default function App() {
   }, []);
 
   // ─── Gov Watcher CRUD ─────────────────────────────────────────────
-  const createGovWatcher = useCallback((feed, level) => {
+  const createGovWatcher = useCallback((feed, level, pollingInterval = 5) => {
     const gw = {
       id: generateId(),
       feedId: feed.id,
@@ -184,6 +231,7 @@ export default function App() {
       level,
       feedUrl: feed.url,
       active: true,
+      pollingInterval, // minutes — per-watcher check frequency
       createdAt: new Date().toISOString(),
     };
     setGovWatchers(prev => [...prev, gw]);
@@ -612,6 +660,7 @@ function GovArticleCard({ article }) {
 function GovWatcherFormModal({ existingFeedIds, onCreate, onClose }) {
   const [search, setSearch] = useState('');
   const [selectedState, setSelectedState] = useState('');
+  const [pollingInterval, setPollingInterval] = useState(5);
 
   const searchLower = search.toLowerCase();
 
@@ -653,6 +702,18 @@ function GovWatcherFormModal({ existingFeedIds, onCreate, onClose }) {
             />
           </div>
 
+          <div className="form-group">
+            <label className="form-label">How often to check</label>
+            <select className="form-select" value={pollingInterval} onChange={e => setPollingInterval(Number(e.target.value))}>
+              <option value={1}>Every 1 minute</option>
+              <option value={5}>Every 5 minutes</option>
+              <option value={15}>Every 15 minutes</option>
+              <option value={30}>Every 30 minutes</option>
+              <option value={60}>Every hour</option>
+            </select>
+            <div className="form-hint">Applies to any feed you select below</div>
+          </div>
+
           {/* Federal feeds */}
           <div className="gov-picker__section">
             <div className="gov-picker__section-title">Federal Agencies</div>
@@ -662,7 +723,7 @@ function GovWatcherFormModal({ existingFeedIds, onCreate, onClose }) {
               </div>
             ) : (
               federalFiltered.map(feed => (
-                <div key={feed.id} className="gov-picker__item" onClick={() => onCreate(feed, 'federal')}>
+                <div key={feed.id} className="gov-picker__item" onClick={() => onCreate(feed, 'federal', pollingInterval)}>
                   <div className="gov-picker__item-name">{feed.name}</div>
                   <div className="gov-picker__item-meta">{feed.category}</div>
                 </div>
@@ -689,7 +750,7 @@ function GovWatcherFormModal({ existingFeedIds, onCreate, onClose }) {
               </div>
             ) : (
               stateFeeds.map(feed => (
-                <div key={feed.id} className="gov-picker__item" onClick={() => onCreate(feed, 'state')}>
+                <div key={feed.id} className="gov-picker__item" onClick={() => onCreate(feed, 'state', pollingInterval)}>
                   <div className="gov-picker__item-name">{feed.name}</div>
                   <div className="gov-picker__item-meta">{feed.category}</div>
                 </div>
@@ -707,7 +768,7 @@ function GovWatcherFormModal({ existingFeedIds, onCreate, onClose }) {
                 </div>
               ) : (
                 localFeeds.map(feed => (
-                  <div key={feed.id} className="gov-picker__item" onClick={() => onCreate(feed, 'local')}>
+                  <div key={feed.id} className="gov-picker__item" onClick={() => onCreate(feed, 'local', pollingInterval)}>
                     <div className="gov-picker__item-name">{feed.name}</div>
                     <div className="gov-picker__item-meta">{feed.category}</div>
                   </div>
@@ -740,6 +801,7 @@ function WatcherFormModal({ watcher, onSave, onClose }) {
     dateTo: watcher?.dateTo || '',
     alertMode: watcher?.alertMode || 'instant',
     channels: watcher?.channels || { push: true, email: false, slack: false },
+    pollingInterval: watcher?.pollingInterval || 5,
   });
 
   const handleSubmit = (e) => {
@@ -750,6 +812,7 @@ function WatcherFormModal({ watcher, onSave, onClose }) {
       excludeKeywords: form.excludeKeywords.split(',').map(s => s.trim()).filter(Boolean),
       trackedEntities: form.trackedEntities.split(',').map(s => s.trim()).filter(Boolean),
       rollingDays: Number(form.rollingDays),
+      pollingInterval: Number(form.pollingInterval),
     });
   };
 
@@ -765,6 +828,18 @@ function WatcherFormModal({ watcher, onSave, onClose }) {
             <div className="form-group">
               <label className="form-label">Name</label>
               <input className="form-input" value={form.name} onChange={e => setForm({ ...form, name: e.target.value })} placeholder="e.g., Idaho Immigration" required />
+            </div>
+
+            <div className="form-group">
+              <label className="form-label">How often to check</label>
+              <select className="form-select" value={form.pollingInterval} onChange={e => setForm({ ...form, pollingInterval: e.target.value })}>
+                <option value={1}>Every 1 minute</option>
+                <option value={5}>Every 5 minutes</option>
+                <option value={15}>Every 15 minutes</option>
+                <option value={30}>Every 30 minutes</option>
+                <option value={60}>Every hour</option>
+              </select>
+              <div className="form-hint">How frequently this watcher checks for new articles</div>
             </div>
 
             <div className="form-group">
@@ -1087,7 +1162,7 @@ function SettingsModal({ settings, onSave, onClose }) {
         <form onSubmit={handleSubmit}>
           <div className="modal__body">
             <div className="form-group">
-              <label className="form-label">Polling Interval (minutes)</label>
+              <label className="form-label">Default Polling Interval</label>
               <select className="form-select" value={form.pollingInterval} onChange={e => setForm({ ...form, pollingInterval: e.target.value })}>
                 <option value={1}>1 minute</option>
                 <option value={5}>5 minutes</option>
@@ -1095,6 +1170,7 @@ function SettingsModal({ settings, onSave, onClose }) {
                 <option value={30}>30 minutes</option>
                 <option value={60}>60 minutes</option>
               </select>
+              <div className="form-hint">Fallback for watchers without their own check frequency</div>
             </div>
 
             <div className="form-group">
