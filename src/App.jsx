@@ -319,7 +319,8 @@ export default function App() {
           </button>
         </div>
 
-        {/* Gov Watchers */}
+        {/* Gov Watchers — hidden for now, will revisit later */}
+        {false && (
         <div className="sidebar__section">
           <div className="sidebar__section-title gov-section-title">Gov Watch</div>
           {govWatchers.map(gw => (
@@ -347,6 +348,7 @@ export default function App() {
             + New Gov Watcher
           </button>
         </div>
+        )}
 
         {/* Quota */}
         <div className="sidebar__section">
@@ -402,7 +404,8 @@ export default function App() {
             Notifications
             {unreadCount > 0 && <span className="tab__badge">{unreadCount}</span>}
           </button>
-          {govWatchers.length > 0 && (
+          {/* Gov Watch tab — hidden for now */}
+          {false && govWatchers.length > 0 && (
             <button className={`tab ${activeTab === 'gov' ? 'active' : ''}`} onClick={() => setActiveTab('gov')}>
               Gov Watch
               {displayGovArticles.length > 0 && <span className="tab__badge tab__badge--gov">{displayGovArticles.length}</span>}
@@ -492,7 +495,8 @@ export default function App() {
             </>
           )}
 
-          {activeTab === 'gov' && (
+          {/* Gov Watch panel — hidden for now */}
+          {false && activeTab === 'gov' && (
             <>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
                 <h3 style={{ fontSize: 16 }}>
@@ -547,14 +551,15 @@ export default function App() {
         <div className="status-bar">
           <div className="status-bar__left">
             <span>
-              <span className={`status-dot ${isPolling || govPolling ? 'status-dot--polling' : error || govError ? 'status-dot--error' : 'status-dot--active'}`} />
-              {isPolling || govPolling ? 'Polling...' : error || govError ? 'Error' : 'Ready'}
+              <span className={`status-dot ${isPolling ? 'status-dot--polling' : error ? 'status-dot--error' : 'status-dot--active'}`} />
+              {isPolling ? 'Polling...' : error ? 'Error' : 'Ready'}
             </span>
             {lastPoll && <span>Last poll: {lastPoll.toLocaleTimeString()}</span>}
           </div>
           <div className="status-bar__right">
             <span>{watchers.filter(w => w.active).length}/{watchers.length} watchers</span>
-            {govWatchers.length > 0 && (
+            {/* Gov stats — hidden for now */}
+            {false && govWatchers.length > 0 && (
               <span>{govWatchers.filter(gw => gw.active).length}/{govWatchers.length} gov</span>
             )}
             <span>{articles.length} articles</span>
@@ -577,8 +582,8 @@ export default function App() {
         />
       )}
 
-      {/* Gov Watcher Form Modal */}
-      {showGovWatcherForm && (
+      {/* Gov Watcher Form Modal — hidden for now */}
+      {false && showGovWatcherForm && (
         <GovWatcherFormModal
           existingFeedIds={govWatchers.map(gw => gw.feedId)}
           onCreate={createGovWatcher}
