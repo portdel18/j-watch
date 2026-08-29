@@ -2,6 +2,8 @@
 // Supports: NewsAPI.org, GNews, NewsData.io, Google News RSS
 // Rate limit tracking, caching, deduplication, smart provider selection
 
+import { articleKey } from './articleStore';
+
 // In production (Vercel), route through /api/news/* serverless functions
 // to avoid CORS and keep API keys server-side.
 const PROXY_BASE = process.env.REACT_APP_PROXY_URL || '';
@@ -73,17 +75,22 @@ export function getQuotaStatus() {
   };
 }
 
-// Article cache for deduplication
-const articleCache = new Map();
-
+// Deduplicate within a single fetch — the same story often comes back from
+// more than one provider in the same poll.
+//
+// This is deliberately NOT a cross-poll cache. A persistent cache here would
+// make every article invisible after the first time it was fetched, so a
+// second poll would return only whatever happened to be brand new. Suppressing
+// already-seen articles is the article store's job (see articleStore.js),
+// which keeps them in the feed instead of dropping them on the floor.
 function deduplicateArticles(articles) {
+  const seen = new Set();
   const unique = [];
   for (const article of articles) {
-    const key = article.url || `${article.title}-${article.source}`;
-    if (!articleCache.has(key)) {
-      articleCache.set(key, true);
-      unique.push(article);
-    }
+    const key = articleKey(article);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    unique.push(article);
   }
   return unique;
 }
@@ -356,10 +363,6 @@ export async function fetchArticles(query, options = {}) {
   }
 
   return deduplicateArticles(articles);
-}
-
-export function clearArticleCache() {
-  articleCache.clear();
 }
 
 export { PROVIDERS };
