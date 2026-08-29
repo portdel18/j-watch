@@ -1,9 +1,11 @@
+import { forwardRateLimitHeaders, missingKey, upstreamFailure } from './_rateLimit.js';
+
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   if (req.method === 'OPTIONS') return res.status(200).end();
 
   const apiKey = process.env.NEWSDATA_KEY;
-  if (!apiKey) return res.status(500).json({ error: 'NEWSDATA_KEY not configured' });
+  if (!apiKey) return missingKey(res, 'NEWSDATA_KEY');
 
   const { q, language } = req.query;
   const params = new URLSearchParams({
@@ -15,8 +17,9 @@ export default async function handler(req, res) {
   try {
     const response = await fetch(`https://newsdata.io/api/1/latest?${params}`);
     const data = await response.json();
+    forwardRateLimitHeaders(response, res);
     res.status(response.status).json(data);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    upstreamFailure(res, err);
   }
 }

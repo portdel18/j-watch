@@ -3,6 +3,7 @@
 // Rate limit tracking, caching, deduplication, smart provider selection
 
 import { articleKey } from './articleStore';
+import { recordRequest, recordSuccess, recordFailure, isAvailable } from './quota';
 
 // In production (Vercel), route through /api/news/* serverless functions
 // to avoid CORS and keep API keys server-side.
@@ -32,47 +33,46 @@ const PROVIDERS = {
   },
 };
 
-// Rate limit tracking (localStorage until Firebase migration)
-function getRateLimits() {
-  const today = new Date().toISOString().split('T')[0];
-  const stored = JSON.parse(localStorage.getItem('jwatch_rateLimits') || '{}');
-  if (stored.date !== today) {
-    return {
-      date: today,
-      newsapi: { used: 0, limit: PROVIDERS.newsapi.dailyLimit },
-      gnews: { used: 0, limit: PROVIDERS.gnews.dailyLimit },
-      newsdata: { used: 0, limit: PROVIDERS.newsdata.dailyLimit },
-    };
+// Quota and provider health live in quota.js, which treats what the provider
+// says (429, a quota-exceeded 403, a rate-limit header) as the truth and the
+// local request count as a mere estimate.
+export { getQuotaStatus, clearBlock as retryProvider, STATUS as PROVIDER_STATUS } from './quota';
+
+// Read an error body without letting a non-JSON response throw. The body text
+// is what tells a quota-exceeded 403 apart from a rejected-key 403.
+async function readErrorBody(res) {
+  try {
+    return (await res.text()).slice(0, 500);
+  } catch {
+    return '';
   }
-  return stored;
 }
 
-function saveRateLimits(limits) {
-  localStorage.setItem('jwatch_rateLimits', JSON.stringify(limits));
-}
+// One place for "we asked, here's what came back", so every provider records
+// its outcome the same way.
+async function requestProvider(provider, url) {
+  recordRequest(provider);
+  const res = await fetch(url);
 
-function recordUsage(provider) {
-  const limits = getRateLimits();
-  if (limits[provider]) {
-    limits[provider].used += 1;
+  if (!res.ok) {
+    const bodyText = await readErrorBody(res);
+    recordFailure(provider, { status: res.status, bodyText, headers: res.headers });
+    const err = new Error(`${PROVIDERS[provider].name} ${res.status}`);
+    err.handled = true;
+    throw err;
   }
-  saveRateLimits(limits);
+
+  recordSuccess(provider, res.headers);
+  return res;
 }
 
-function hasQuota(provider) {
-  const limits = getRateLimits();
-  if (!limits[provider]) return true;
-  return limits[provider].used < limits[provider].limit;
-}
-
-export function getQuotaStatus() {
-  const limits = getRateLimits();
-  return {
-    newsapi: limits.newsapi || { used: 0, limit: 100 },
-    gnews: limits.gnews || { used: 0, limit: 100 },
-    newsdata: limits.newsdata || { used: 0, limit: 200 },
-    rss: { used: 0, limit: Infinity },
-  };
+// Network-level failures (offline, DNS, CORS) never reached the provider, so
+// they get the transient-error backoff rather than being treated as quota.
+function noteFetchError(provider, err) {
+  if (!err.handled) {
+    recordFailure(provider, { status: 0, message: err.message });
+  }
+  console.warn(`[${PROVIDERS[provider].name}] Fetch failed:`, err.message);
 }
 
 // Deduplicate within a single fetch — the same story often comes back from
@@ -175,7 +175,7 @@ function normalizeArticle(raw, provider) {
 // Provider fetchers
 async function fetchFromNewsAPI(query, options = {}) {
   if (!USE_PROXY && !process.env.REACT_APP_NEWSAPI_KEY) return [];
-  if (!hasQuota('newsapi')) return [];
+  if (!isAvailable('newsapi')) return [];
 
   const baseUrl = USE_PROXY
     ? `${PROXY_BASE}/api/news/newsapi`
@@ -193,20 +193,28 @@ async function fetchFromNewsAPI(query, options = {}) {
   if (options.to) params.set('to', options.to);
 
   try {
-    const res = await fetch(`${baseUrl}?${params}`);
-    if (!res.ok) throw new Error(`NewsAPI ${res.status}`);
+    const res = await requestProvider('newsapi', `${baseUrl}?${params}`);
     const data = await res.json();
-    recordUsage('newsapi');
+    // NewsAPI can answer 200 with an error envelope; don't read that as
+    // "no articles today"
+    if (data.status === 'error') {
+      recordFailure('newsapi', {
+        status: res.status,
+        bodyText: `${data.code || ''} ${data.message || ''}`,
+        message: data.message,
+      });
+      return [];
+    }
     return (data.articles || []).map(a => normalizeArticle(a, 'newsapi'));
   } catch (err) {
-    console.warn('[NewsAPI] Fetch failed:', err.message);
+    noteFetchError('newsapi', err);
     return [];
   }
 }
 
 async function fetchFromGNews(query, options = {}) {
   if (!USE_PROXY && !process.env.REACT_APP_GNEWS_KEY) return [];
-  if (!hasQuota('gnews')) return [];
+  if (!isAvailable('gnews')) return [];
 
   const baseUrl = USE_PROXY
     ? `${PROXY_BASE}/api/news/gnews`
@@ -223,20 +231,26 @@ async function fetchFromGNews(query, options = {}) {
   if (options.to) params.set('to', options.to);
 
   try {
-    const res = await fetch(`${baseUrl}?${params}`);
-    if (!res.ok) throw new Error(`GNews ${res.status}`);
+    const res = await requestProvider('gnews', `${baseUrl}?${params}`);
     const data = await res.json();
-    recordUsage('gnews');
+    if (Array.isArray(data.errors) && data.errors.length > 0) {
+      recordFailure('gnews', {
+        status: res.status,
+        bodyText: data.errors.join(' '),
+        message: data.errors[0],
+      });
+      return [];
+    }
     return (data.articles || []).map(a => normalizeArticle(a, 'gnews'));
   } catch (err) {
-    console.warn('[GNews] Fetch failed:', err.message);
+    noteFetchError('gnews', err);
     return [];
   }
 }
 
 async function fetchFromNewsData(query, options = {}) {
   if (!USE_PROXY && !process.env.REACT_APP_NEWSDATA_KEY) return [];
-  if (!hasQuota('newsdata')) return [];
+  if (!isAvailable('newsdata')) return [];
 
   const baseUrl = USE_PROXY
     ? `${PROXY_BASE}/api/news/newsdata`
@@ -249,31 +263,34 @@ async function fetchFromNewsData(query, options = {}) {
   });
 
   try {
-    const res = await fetch(`${baseUrl}?${params}`);
-    if (!res.ok) throw new Error(`NewsData ${res.status}`);
+    const res = await requestProvider('newsdata', `${baseUrl}?${params}`);
     const data = await res.json();
-    recordUsage('newsdata');
+    if (data.status === 'error') {
+      recordFailure('newsdata', {
+        status: res.status,
+        bodyText: JSON.stringify(data.results || data),
+        message: data.results?.message,
+      });
+      return [];
+    }
     return (data.results || []).map(a => normalizeArticle(a, 'newsdata'));
   } catch (err) {
-    console.warn('[NewsData] Fetch failed:', err.message);
+    noteFetchError('newsdata', err);
     return [];
   }
 }
 
 async function fetchFromGoogleRSS(query) {
+  // RSS has no quota, but it can still be down — and when it is, it is the
+  // last line of fallback, so its health belongs on the dashboard too.
+  if (!isAvailable('rss')) return [];
+
   try {
-    let xmlText;
-    if (USE_PROXY) {
-      const res = await fetch(`${PROXY_BASE}/api/news/rss?q=${encodeURIComponent(query)}`);
-      if (!res.ok) throw new Error(`RSS proxy ${res.status}`);
-      xmlText = await res.text();
-    } else {
-      // Direct fetch — may be blocked by CORS in browser
-      const rssUrl = `https://news.google.com/rss/search?q=${encodeURIComponent(query)}&hl=en-US&gl=US&ceid=US:en`;
-      const res = await fetch(rssUrl);
-      if (!res.ok) throw new Error(`RSS ${res.status}`);
-      xmlText = await res.text();
-    }
+    const url = USE_PROXY
+      ? `${PROXY_BASE}/api/news/rss?q=${encodeURIComponent(query)}`
+      : `https://news.google.com/rss/search?q=${encodeURIComponent(query)}&hl=en-US&gl=US&ceid=US:en`;
+    const res = await requestProvider('rss', url);
+    const xmlText = await res.text();
 
     const parser = new DOMParser();
     const xml = parser.parseFromString(xmlText, 'text/xml');
@@ -301,7 +318,7 @@ async function fetchFromGoogleRSS(query) {
 
     return articles;
   } catch (err) {
-    console.warn('[Google RSS] Fetch failed:', err.message);
+    noteFetchError('rss', err);
     return [];
   }
 }
@@ -318,7 +335,9 @@ function selectProviders() {
       if (p === 'gnews' && !process.env.REACT_APP_GNEWS_KEY) return false;
       if (p === 'newsdata' && !process.env.REACT_APP_NEWSDATA_KEY) return false;
     }
-    return hasQuota(p);
+    // Skips providers that are out of quota, blocked on a rejected key, or
+    // backing off after an error — so a spent provider costs no requests
+    return isAvailable(p);
   });
 
   if (available.length === 0) return ['rss'];

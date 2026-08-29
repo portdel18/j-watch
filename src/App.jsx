@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import ChannelToggle from './components/ChannelToggle';
 import { usePolling } from './hooks/usePolling';
-import { getQuotaStatus } from './services/newsApi';
+import { getQuotaStatus, retryProvider, PROVIDER_STATUS } from './services/newsApi';
 import { requestPushPermission, getPushPermission, dispatchNotification } from './services/notifications';
 import { articleKey } from './services/articleStore';
 import { US_STATES, IDAHO_REGIONS, SOURCE_MAP } from './data/geography';
@@ -291,7 +291,19 @@ export default function App() {
   }, [saved, savedSearch]);
 
   // ─── Quota ─────────────────────────────────────────────────────────
-  const quota = getQuotaStatus();
+  // Recomputed after each poll (and after a manual retry) so the sidebar
+  // reflects what the providers actually said, not a stale render.
+  const [quotaTick, setQuotaTick] = useState(0);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const quota = React.useMemo(() => getQuotaStatus(), [lastPoll, isPolling, quotaTick]);
+
+  const handleRetryProvider = useCallback((provider) => {
+    retryProvider(provider);
+    setQuotaTick(t => t + 1);
+  }, []);
+
+  // Every source is out — the feed can't refill until one comes back
+  const allProvidersDown = Object.values(quota).every(q => !q.available);
 
   // ─── Filtered articles ─────────────────────────────────────────────
   const displayArticles = selectedWatcher
@@ -388,20 +400,14 @@ export default function App() {
         <div className="sidebar__section">
           <div className="sidebar__section-title">API Quota</div>
           <div className="quota-display">
-            {['newsapi', 'gnews', 'newsdata'].map(provider => {
-              const q = quota[provider];
-              const pct = q.limit === Infinity ? 0 : (q.used / q.limit) * 100;
-              const cls = pct > 80 ? 'danger' : pct > 60 ? 'warning' : '';
-              return (
-                <div key={provider} className="quota-bar">
-                  <span className="quota-bar__label">{provider}</span>
-                  <div className="quota-bar__track">
-                    <div className={`quota-bar__fill ${cls}`} style={{ width: `${pct}%` }} />
-                  </div>
-                  <span className="quota-bar__count">{q.used}/{q.limit === Infinity ? '∞' : q.limit}</span>
-                </div>
-              );
-            })}
+            {['newsapi', 'gnews', 'newsdata', 'rss'].map(provider => (
+              <QuotaRow
+                key={provider}
+                provider={provider}
+                status={quota[provider]}
+                onRetry={handleRetryProvider}
+              />
+            ))}
           </div>
         </div>
 
@@ -457,6 +463,14 @@ export default function App() {
               {error && (
                 <div style={{ padding: '12px 16px', marginBottom: 12, background: 'var(--danger-dim)', border: '1px solid var(--danger)', borderRadius: 'var(--radius)', fontSize: 13 }}>
                   Polling error: {error}
+                </div>
+              )}
+
+              {allProvidersDown && (
+                <div className="provider-alert">
+                  <strong>No sources available right now.</strong> Every provider is out of
+                  quota, blocked or erroring &mdash; see API Quota in the sidebar for which
+                  and why. Articles already in the feed stay put.
                 </div>
               )}
 
@@ -669,6 +683,84 @@ export default function App() {
           onSave={(s) => { setSettings(s); setShowSettings(false); }}
           onClose={() => setShowSettings(false)}
         />
+      )}
+    </div>
+  );
+}
+
+// ─── Quota Row ───────────────────────────────────────────────────────
+// Shows what the provider actually reported, not just a local tally: whether
+// the number is our estimate or the provider's own count, why a source is
+// unavailable, and when it comes back.
+function QuotaRow({ provider, status, onRetry }) {
+  const unlimited = !Number.isFinite(status.limit);
+  const pct = unlimited ? 0 : Math.min(100, (status.used / status.limit) * 100);
+
+  let cls = '';
+  if (!status.available) cls = 'danger';
+  else if (pct > 80) cls = 'danger';
+  else if (pct > 60) cls = 'warning';
+
+  const resetLabel = status.resetsAt
+    ? new Date(status.resetsAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+    : null;
+
+  let detail = null;
+  let canRetry = false;
+  switch (status.status) {
+    case PROVIDER_STATUS.EXHAUSTED:
+      // RSS has no quota to spend — when it says no, it's throttling us
+      if (unlimited) {
+        detail = resetLabel ? `Rate limited \u00b7 retries ${resetLabel}` : 'Rate limited';
+      } else {
+        detail = resetLabel ? `Quota reached \u00b7 resets ${resetLabel}` : 'Quota reached';
+      }
+      break;
+    case PROVIDER_STATUS.UNAUTHORIZED:
+      detail = 'API key rejected';
+      canRetry = true;
+      break;
+    case PROVIDER_STATUS.UNCONFIGURED:
+      detail = 'No key configured on the server';
+      canRetry = true;
+      break;
+    case PROVIDER_STATUS.ERROR:
+      detail = status.blocked && resetLabel
+        ? `${status.lastError || 'Request failed'} \u00b7 retrying ${resetLabel}`
+        : (status.lastError || 'Request failed');
+      canRetry = true;
+      break;
+    default:
+      detail = null;
+  }
+
+  return (
+    <div className={`quota-row ${!status.available ? 'quota-row--down' : ''}`}>
+      <div className="quota-bar">
+        <span className="quota-bar__label">{provider}</span>
+        <div className="quota-bar__track">
+          <div className={`quota-bar__fill ${cls}`} style={{ width: `${pct}%` }} />
+        </div>
+        <span
+          className="quota-bar__count"
+          title={status.estimated
+            ? 'Counted locally in this browser — the provider has not reported a number'
+            : 'Reported by the provider'}
+        >
+          {unlimited
+            ? '\u221e'
+            : `${status.estimated ? '~' : ''}${status.used}/${status.limit}`}
+        </span>
+      </div>
+      {detail && (
+        <div className="quota-row__detail">
+          <span>{detail}</span>
+          {canRetry && (
+            <button className="quota-row__retry" onClick={() => onRetry(provider)}>
+              Retry
+            </button>
+          )}
+        </div>
       )}
     </div>
   );
