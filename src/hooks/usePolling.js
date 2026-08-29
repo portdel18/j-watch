@@ -2,6 +2,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { fetchArticles } from '../services/newsApi';
 import { matchArticles, buildSearchQuery } from '../services/matchingEngine';
+import { mergeArticles, mergeExcluded, articleKey } from '../services/articleStore';
 
 function loadJSON(key, fallback) {
   try {
@@ -22,10 +23,17 @@ export function usePolling(watchers, settings = {}) {
     const saved = localStorage.getItem('jwatch_lastPoll');
     return saved ? new Date(saved) : null;
   });
+  // Keys of articles that arrived in the most recent poll, so the feed can
+  // flag what is actually new instead of guessing from list length.
+  const [newKeys, setNewKeys] = useState(() => new Set());
   const [error, setError] = useState(null);
   const intervalRef = useRef(null);
   const isMountedRef = useRef(true);
   const isPollingRef = useRef(false); // guard against concurrent polls
+  // Mirrors `articles` so a poll can merge against the current store and know
+  // which keys are new right away — a setState updater runs at render time,
+  // too late to tell us anything during the poll itself.
+  const articlesRef = useRef(articles);
   // Track when each watcher was last polled: { [watcherId]: timestamp }
   const lastPollPerWatcher = useRef(
     loadJSON('jwatch_lastPollPerWatcher', {})
@@ -83,7 +91,7 @@ export function usePolling(watchers, settings = {}) {
         }));
 
         allMatched.push(...tagged);
-        allExcluded.push(...exc);
+        allExcluded.push(...exc.map(a => ({ ...a, matchedWatcherId: watcher.id })));
 
         // Mark this watcher as polled
         lastPollPerWatcher.current[watcher.id] = now;
@@ -93,25 +101,22 @@ export function usePolling(watchers, settings = {}) {
       localStorage.setItem('jwatch_lastPollPerWatcher', JSON.stringify(lastPollPerWatcher.current));
 
       if (isMountedRef.current) {
-        // Merge new results with existing articles (keep articles from watchers not polled this tick)
-        setArticles(prev => {
-          const polledIds = new Set(dueWatchers.map(w => w.id));
-          // Keep articles from watchers that were NOT polled this tick
-          const kept = prev.filter(a => !polledIds.has(a.matchedWatcherId));
-          const combined = [...kept, ...allMatched];
+        // Accumulate: a poll ADDS to the feed. Articles already on screen stay
+        // there even when a provider doesn't return them again — providers are
+        // rotated and their result sets vary from call to call, so replacing
+        // the list would make the feed shrink and reshuffle at random.
+        const knownWatcherIds = new Set(watchers.map(w => w.id));
 
-          // Deduplicate by URL, keeping highest geo score
-          const seen = new Map();
-          for (const article of combined) {
-            const key = article.url || article.title;
-            const existing = seen.get(key);
-            if (!existing || (article.geoScore || 0) > (existing.geoScore || 0)) {
-              seen.set(key, article);
-            }
-          }
-          return Array.from(seen.values());
-        });
-        setExcluded(allExcluded);
+        const { articles: nextArticles, newKeys: freshKeys } = mergeArticles(
+          articlesRef.current,
+          allMatched,
+          { now, knownWatcherIds }
+        );
+        articlesRef.current = nextArticles;
+
+        setArticles(nextArticles);
+        setExcluded(prev => mergeExcluded(prev, allExcluded, { now, knownWatcherIds }));
+        setNewKeys(new Set(freshKeys));
         setLastPoll(new Date());
       }
     } catch (err) {
@@ -137,8 +142,29 @@ export function usePolling(watchers, settings = {}) {
     await pollDue();
   }, [watchers, pollDue]);
 
+  // Remove a single article from the feed (it stays gone until re-fetched)
+  const dismissArticle = useCallback((article) => {
+    const key = articleKey(article);
+    setArticles(prev => {
+      const next = prev.filter(a => articleKey(a) !== key);
+      articlesRef.current = next;
+      return next;
+    });
+  }, []);
+
+  // Clear the whole feed — next poll starts from an empty archive
+  const clearArticles = useCallback(() => {
+    articlesRef.current = [];
+    setArticles([]);
+    setExcluded([]);
+    setNewKeys(new Set());
+  }, []);
+
   // Persist articles to localStorage
-  useEffect(() => { localStorage.setItem('jwatch_articles', JSON.stringify(articles)); }, [articles]);
+  useEffect(() => {
+    articlesRef.current = articles;
+    localStorage.setItem('jwatch_articles', JSON.stringify(articles));
+  }, [articles]);
   useEffect(() => { localStorage.setItem('jwatch_excluded', JSON.stringify(excluded)); }, [excluded]);
   useEffect(() => { if (lastPoll) localStorage.setItem('jwatch_lastPoll', lastPoll.toISOString()); }, [lastPoll]);
 
@@ -178,7 +204,10 @@ export function usePolling(watchers, settings = {}) {
     excluded,
     isPolling,
     lastPoll,
+    newKeys,
     error,
     pollNow,
+    dismissArticle,
+    clearArticles,
   };
 }

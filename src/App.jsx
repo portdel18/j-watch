@@ -3,6 +3,7 @@ import ChannelToggle from './components/ChannelToggle';
 import { usePolling } from './hooks/usePolling';
 import { getQuotaStatus } from './services/newsApi';
 import { requestPushPermission, getPushPermission, dispatchNotification } from './services/notifications';
+import { articleKey } from './services/articleStore';
 import { US_STATES, IDAHO_REGIONS, SOURCE_MAP } from './data/geography';
 import { FEDERAL_FEEDS, STATE_FEEDS, LOCAL_FEEDS } from './data/govFeeds';
 import { PROVIDERS } from './services/newsApi';
@@ -61,7 +62,8 @@ function generateId() {
 export default function App() {
   // State
   const [watchers, setWatchers] = useState(() => loadJSON('jwatch_watchers', []));
-  const [notifications, setNotifications] = useState(() => loadJSON('jwatch_notifications', []));
+  const [saved, setSaved] = useState(() => loadJSON('jwatch_saved', []));
+  const [savedSearch, setSavedSearch] = useState('');
   const [settings, setSettings] = useState(() => loadJSON('jwatch_settings', DEFAULT_SETTINGS));
   const [activeTab, setActiveTab] = useState('feed');
   const [selectedWatcher, setSelectedWatcher] = useState(null);
@@ -83,7 +85,7 @@ export default function App() {
   const [govError, setGovError] = useState(null);
 
   // Polling
-  const { articles, excluded, isPolling, lastPoll, error, pollNow } = usePolling(watchers, settings);
+  const { articles, excluded, isPolling, lastPoll, newKeys, error, pollNow, dismissArticle, clearArticles } = usePolling(watchers, settings);
 
   // Gov Watch polling — per-watcher intervals
   const govLastPollPerWatcher = React.useRef(loadJSON('jwatch_gov_lastPollPerWatcher', {}));
@@ -165,43 +167,44 @@ export default function App() {
 
   // Persist to localStorage
   useEffect(() => { saveJSON('jwatch_watchers', watchers); }, [watchers]);
-  useEffect(() => { saveJSON('jwatch_notifications', notifications); }, [notifications]);
+  useEffect(() => { saveJSON('jwatch_saved', saved); }, [saved]);
   useEffect(() => { saveJSON('jwatch_settings', settings); }, [settings]);
   useEffect(() => { saveJSON('jwatch_gov_watchers', govWatchers); }, [govWatchers]);
   useEffect(() => { saveJSON('jwatch_gov_articles', govArticles); }, [govArticles]);
   useEffect(() => { if (govLastPoll) localStorage.setItem('jwatch_gov_lastPoll', govLastPoll.toISOString()); }, [govLastPoll]);
 
-  // Handle new matched articles → create notifications
-  const prevArticleCountRef = React.useRef(0);
+  // Alert on genuinely new matched articles.
+  //
+  // This used to compare list lengths and treat the first N articles as "new",
+  // which alerted on whatever happened to sort to the top. The polling hook now
+  // reports exactly which keys arrived in the last poll, and alertedKeysRef
+  // stops the same story alerting twice across reloads.
+  const alertedKeysRef = React.useRef(new Set(loadJSON('jwatch_alertedKeys', [])));
   useEffect(() => {
-    if (articles.length > prevArticleCountRef.current && prevArticleCountRef.current > 0) {
-      const newArticles = articles.slice(0, articles.length - prevArticleCountRef.current);
-      for (const article of newArticles.slice(0, 5)) {
-        const watcher = watchers.find(w => w.id === article.matchedWatcherId);
-        if (watcher) {
-          // Create notification record
-          const notif = {
-            id: generateId(),
-            watcherId: watcher.id,
-            watcherName: watcher.name,
-            articleId: article.url,
-            articleTitle: article.title,
-            articleSource: article.source,
-            timestamp: new Date().toISOString(),
-            read: false,
-            alertMode: watcher.alertMode,
-          };
-          setNotifications(prev => [notif, ...prev].slice(0, 100));
+    if (!newKeys || newKeys.size === 0) return;
 
-          // Dispatch push/email/slack
-          if (watcher.alertMode === 'instant') {
-            dispatchNotification(article, watcher, settings);
-          }
-        }
+    const freshArticles = articles.filter(a => {
+      const key = articleKey(a);
+      return newKeys.has(key) && !alertedKeysRef.current.has(key);
+    });
+    if (freshArticles.length === 0) return;
+
+    for (const article of freshArticles.slice(0, 5)) {
+      const watcher = watchers.find(w => w.id === article.matchedWatcherId);
+      if (!watcher) continue;
+      if (watcher.alertMode === 'instant') {
+        dispatchNotification(article, watcher, settings);
       }
     }
-    prevArticleCountRef.current = articles.length;
-  }, [articles, watchers, settings]);
+
+    for (const article of freshArticles) {
+      alertedKeysRef.current.add(articleKey(article));
+    }
+    // Keep the alerted set bounded so it can't grow forever in localStorage
+    const keys = Array.from(alertedKeysRef.current).slice(-1000);
+    alertedKeysRef.current = new Set(keys);
+    saveJSON('jwatch_alertedKeys', keys);
+  }, [newKeys, articles, watchers, settings]);
 
   // ─── Watcher CRUD ──────────────────────────────────────────────────
   const createWatcher = useCallback((data) => {
@@ -252,12 +255,40 @@ export default function App() {
     setGovWatchers(prev => prev.map(gw => gw.id === id ? { ...gw, active: !gw.active } : gw));
   }, []);
 
-  // ─── Notifications ─────────────────────────────────────────────────
-  const markAllRead = useCallback(() => {
-    setNotifications(prev => prev.map(n => ({ ...n, read: true })));
+  // ─── Saved articles ────────────────────────────────────────────────
+  // Saved items keep a full copy of the article, so they survive feed pruning,
+  // watcher deletion and provider churn.
+  const savedKeys = React.useMemo(() => new Set(saved.map(articleKey)), [saved]);
+
+  const toggleSaved = useCallback((article) => {
+    const key = articleKey(article);
+    setSaved(prev => {
+      if (prev.some(a => articleKey(a) === key)) {
+        return prev.filter(a => articleKey(a) !== key);
+      }
+      return [{ ...article, savedAt: new Date().toISOString(), note: '' }, ...prev];
+    });
   }, []);
 
-  const unreadCount = notifications.filter(n => !n.read).length;
+  const removeSaved = useCallback((article) => {
+    const key = articleKey(article);
+    setSaved(prev => prev.filter(a => articleKey(a) !== key));
+  }, []);
+
+  const updateSavedNote = useCallback((article, note) => {
+    const key = articleKey(article);
+    setSaved(prev => prev.map(a => articleKey(a) === key ? { ...a, note } : a));
+  }, []);
+
+  const displaySaved = React.useMemo(() => {
+    const q = savedSearch.trim().toLowerCase();
+    if (!q) return saved;
+    return saved.filter(a =>
+      `${a.title} ${a.snippet} ${a.source} ${a.matchedWatcherName || ''} ${a.note || ''}`
+        .toLowerCase()
+        .includes(q)
+    );
+  }, [saved, savedSearch]);
 
   // ─── Quota ─────────────────────────────────────────────────────────
   const quota = getQuotaStatus();
@@ -270,6 +301,9 @@ export default function App() {
   const displayExcluded = selectedWatcher
     ? excluded.filter(a => a.matchedWatcherId === selectedWatcher)
     : excluded;
+
+  // How many of the visible articles arrived in the most recent poll
+  const newCount = displayArticles.filter(a => newKeys.has(articleKey(a))).length;
 
   // Gov Watch filtered articles
   const displayGovArticles = selectedGovWatcher
@@ -400,9 +434,9 @@ export default function App() {
             Feed
             {displayArticles.length > 0 && <span className="tab__badge">{displayArticles.length}</span>}
           </button>
-          <button className={`tab ${activeTab === 'notifications' ? 'active' : ''}`} onClick={() => setActiveTab('notifications')}>
-            Notifications
-            {unreadCount > 0 && <span className="tab__badge">{unreadCount}</span>}
+          <button className={`tab ${activeTab === 'saved' ? 'active' : ''}`} onClick={() => setActiveTab('saved')}>
+            Saved
+            {saved.length > 0 && <span className="tab__badge">{saved.length}</span>}
           </button>
           {/* Gov Watch tab — hidden for now */}
           {false && govWatchers.length > 0 && (
@@ -438,25 +472,40 @@ export default function App() {
                 </div>
               ) : (
                 <>
-                  {displayExcluded.length > 0 && (
-                    <div style={{ marginBottom: 12, fontSize: 13, color: 'var(--text-muted)' }}>
-                      {displayArticles.length} results ({displayExcluded.length} excluded)
-                      <button
-                        className="btn btn--sm"
-                        style={{ marginLeft: 8 }}
-                        onClick={() => setShowExcluded(!showExcluded)}
-                      >
-                        {showExcluded ? 'Hide excluded' : 'Show excluded'}
+                  <div className="feed-toolbar">
+                    <span>
+                      {displayArticles.length} results
+                      {newCount > 0 && <span className="feed-toolbar__new">{newCount} new</span>}
+                      {displayExcluded.length > 0 && ` \u00b7 ${displayExcluded.length} excluded`}
+                    </span>
+                    <span className="feed-toolbar__actions">
+                      {displayExcluded.length > 0 && (
+                        <button className="btn btn--sm" onClick={() => setShowExcluded(!showExcluded)}>
+                          {showExcluded ? 'Hide excluded' : 'Show excluded'}
+                        </button>
+                      )}
+                      <button className="btn btn--sm" onClick={clearArticles} title="Empty the feed archive">
+                        Clear feed
                       </button>
-                    </div>
-                  )}
+                    </span>
+                  </div>
 
-                  {displayArticles.map((article, i) => (
-                    <ArticleCard key={article.url || i} article={article} />
-                  ))}
+                  {displayArticles.map((article, i) => {
+                    const key = articleKey(article) || String(i);
+                    return (
+                      <ArticleCard
+                        key={key}
+                        article={article}
+                        isNew={newKeys.has(key)}
+                        isSaved={savedKeys.has(key)}
+                        onToggleSave={toggleSaved}
+                        onDismiss={dismissArticle}
+                      />
+                    );
+                  })}
 
                   {showExcluded && displayExcluded.map((article, i) => (
-                    <div key={`excl-${i}`} style={{ opacity: 0.5 }}>
+                    <div key={`excl-${articleKey(article) || i}`} style={{ opacity: 0.5 }}>
                       <ArticleCard article={article} excluded />
                     </div>
                   ))}
@@ -465,31 +514,53 @@ export default function App() {
             </>
           )}
 
-          {activeTab === 'notifications' && (
+          {activeTab === 'saved' && (
             <>
-              <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 16 }}>
-                <h3 style={{ fontSize: 16 }}>Notifications</h3>
-                {notifications.length > 0 && (
-                  <button className="btn btn--sm" onClick={markAllRead}>Mark all read</button>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16, gap: 12 }}>
+                <h3 style={{ fontSize: 16, whiteSpace: 'nowrap' }}>
+                  Saved
+                  {saved.length > 0 && (
+                    <span style={{ fontSize: 12, color: 'var(--text-muted)', fontWeight: 400, marginLeft: 8 }}>
+                      {displaySaved.length === saved.length
+                        ? `${saved.length} article${saved.length === 1 ? '' : 's'}`
+                        : `${displaySaved.length} of ${saved.length}`}
+                    </span>
+                  )}
+                </h3>
+                {saved.length > 0 && (
+                  <input
+                    className="form-input"
+                    style={{ maxWidth: 280 }}
+                    value={savedSearch}
+                    onChange={e => setSavedSearch(e.target.value)}
+                    placeholder="Search saved..."
+                  />
                 )}
               </div>
 
-              {notifications.length === 0 ? (
+              {saved.length === 0 ? (
                 <div className="empty-state">
-                  <div className="empty-state__icon">&#128276;</div>
-                  <div className="empty-state__title">No notifications</div>
-                  <div className="empty-state__text">Notifications will appear here when articles match your watchers.</div>
+                  <div className="empty-state__icon">&#9733;</div>
+                  <div className="empty-state__title">Nothing saved yet</div>
+                  <div className="empty-state__text">
+                    Click the star on any article in the feed to keep it here. Saved articles
+                    stay put even after the feed rolls over.
+                  </div>
+                </div>
+              ) : displaySaved.length === 0 ? (
+                <div className="empty-state">
+                  <div className="empty-state__icon">&#128269;</div>
+                  <div className="empty-state__title">No matches</div>
+                  <div className="empty-state__text">Nothing saved matches &ldquo;{savedSearch}&rdquo;.</div>
                 </div>
               ) : (
-                notifications.map(n => (
-                  <div key={n.id} className={`notification-item ${n.read ? '' : 'unread'}`}>
-                    <div className="notification-item__content">
-                      <div className="notification-item__title">{n.articleTitle}</div>
-                      <div className="notification-item__meta">
-                        {n.watcherName} &middot; {n.articleSource} &middot; {new Date(n.timestamp).toLocaleString()}
-                      </div>
-                    </div>
-                  </div>
+                displaySaved.map((article, i) => (
+                  <SavedArticleCard
+                    key={articleKey(article) || i}
+                    article={article}
+                    onRemove={removeSaved}
+                    onNoteChange={updateSavedNote}
+                  />
                 ))
               )}
             </>
@@ -604,23 +675,49 @@ export default function App() {
 }
 
 // ─── Article Card ────────────────────────────────────────────────────
-function ArticleCard({ article, excluded }) {
+function ArticleCard({ article, excluded, isNew, isSaved, onToggleSave, onDismiss }) {
   const sourceType = article.sourceType || 'unknown';
   const confidence = article.geoConfidence || 'unknown';
 
   return (
-    <div className="article-card">
+    <div className={`article-card ${isNew ? 'article-card--new' : ''}`}>
       <div className="article-card__header">
         <div className="article-card__title">
           <a href={article.url} target="_blank" rel="noopener noreferrer">
             {article.title}
           </a>
         </div>
+        {(onToggleSave || onDismiss) && (
+          <div className="article-card__tools">
+            {onToggleSave && (
+              <button
+                className={`btn btn--icon ${isSaved ? 'btn--icon-active' : ''}`}
+                onClick={() => onToggleSave(article)}
+                title={isSaved ? 'Remove from Saved' : 'Save this article'}
+                aria-label={isSaved ? 'Remove from Saved' : 'Save this article'}
+                aria-pressed={!!isSaved}
+              >
+                {isSaved ? '\u2605' : '\u2606'}
+              </button>
+            )}
+            {onDismiss && (
+              <button
+                className="btn btn--icon"
+                onClick={() => onDismiss(article)}
+                title="Hide this article from the feed"
+                aria-label="Hide this article from the feed"
+              >
+                &times;
+              </button>
+            )}
+          </div>
+        )}
       </div>
       {article.snippet && (
         <div className="article-card__snippet">{article.snippet}</div>
       )}
       <div className="article-card__meta">
+        {isNew && <span className="badge badge--new">new</span>}
         <span className="badge badge--source">{sourceType}</span>
         <span className={`badge ${confidence === 'high' ? 'badge--geo' : 'badge--geo-low'}`}>
           {confidence} geo
@@ -635,6 +732,77 @@ function ArticleCard({ article, excluded }) {
         <div style={{ marginTop: 8, fontSize: 12, color: 'var(--text-muted)' }}>
           Matched: {article.matchedLocations.join(', ')}
         </div>
+      )}
+    </div>
+  );
+}
+
+// ─── Saved Article Card ──────────────────────────────────────────────
+function SavedArticleCard({ article, onRemove, onNoteChange }) {
+  const [editingNote, setEditingNote] = useState(false);
+  const [draft, setDraft] = useState(article.note || '');
+
+  const commitNote = () => {
+    onNoteChange(article, draft.trim());
+    setEditingNote(false);
+  };
+
+  return (
+    <div className="article-card article-card--saved">
+      <div className="article-card__header">
+        <div className="article-card__title">
+          <a href={article.url} target="_blank" rel="noopener noreferrer">
+            {article.title}
+          </a>
+        </div>
+        <div className="article-card__tools">
+          <button
+            className="btn btn--icon btn--icon-active"
+            onClick={() => onRemove(article)}
+            title="Remove from Saved"
+            aria-label="Remove from Saved"
+          >
+            {'\u2605'}
+          </button>
+        </div>
+      </div>
+
+      {article.snippet && <div className="article-card__snippet">{article.snippet}</div>}
+
+      <div className="article-card__meta">
+        {article.matchedWatcherName && (
+          <span className="badge badge--source">{article.matchedWatcherName}</span>
+        )}
+        <span>{article.source}</span>
+        <span>{article.date ? new Date(article.date).toLocaleDateString() : ''}</span>
+        <span>Saved {article.savedAt ? new Date(article.savedAt).toLocaleDateString() : ''}</span>
+      </div>
+
+      {editingNote ? (
+        <div className="saved-note">
+          <textarea
+            className="form-textarea"
+            rows={2}
+            value={draft}
+            onChange={e => setDraft(e.target.value)}
+            placeholder="Why does this matter? Angle, follow-up, source to call..."
+            autoFocus
+          />
+          <div className="saved-note__actions">
+            <button className="btn btn--sm btn--primary" onClick={commitNote}>Save note</button>
+            <button className="btn btn--sm" onClick={() => { setDraft(article.note || ''); setEditingNote(false); }}>
+              Cancel
+            </button>
+          </div>
+        </div>
+      ) : article.note ? (
+        <div className="saved-note__text" onClick={() => setEditingNote(true)} title="Click to edit">
+          {article.note}
+        </div>
+      ) : (
+        <button className="btn btn--sm saved-note__add" onClick={() => setEditingNote(true)}>
+          + Add note
+        </button>
       )}
     </div>
   );
