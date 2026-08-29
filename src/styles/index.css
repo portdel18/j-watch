@@ -600,12 +600,58 @@ body {
   margin-top: 10px;
 }
 
+/* Provider alert banner */
+.provider-alert {
+  padding: 12px 16px;
+  margin-bottom: 12px;
+  background: var(--warning-dim);
+  border: 1px solid var(--warning);
+  border-radius: var(--radius);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
 /* Quota display */
 .quota-display {
   display: flex;
   flex-direction: column;
   gap: 8px;
   font-size: 12px;
+}
+
+.quota-row {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.quota-row--down .quota-bar__label {
+  color: var(--danger);
+}
+
+.quota-row__detail {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding-left: 2px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.quota-row__retry {
+  flex-shrink: 0;
+  padding: 1px 6px;
+  background: transparent;
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-sm);
+  color: var(--accent);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.quota-row__retry:hover {
+  border-color: var(--accent);
 }
 
 .quota-bar {
